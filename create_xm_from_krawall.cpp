@@ -286,7 +286,11 @@ int main(int argc, const char * argv[]) {
                 uint32_t ssize = s->size / 2;
                 fwrite(&ssize, 4, 1, out);
             } else fwrite(&s->size, 4, 1, out);
-            fputcn(0, 4, out);
+            if (s->loopLength == 0) fputcn(0, 4, out);
+            else {
+                uint32_t start = s->size - s->loopLength;
+                fwrite(&start, 4, 1, out);
+            }
             fwrite(&s->loopLength, 4, 1, out);
             fputc(s->volDefault, out);
             fputc(s->fineTune, out);
@@ -308,10 +312,10 @@ int main(int argc, const char * argv[]) {
                     old = ((signed short*)s->data)[k];
                 }
             } else { // 8-bit
-                signed char old = 0;
+                unsigned char old = 0;
                 for (uint32_t k = 0; k < s->size; k++) {
-                    fputc(s->data[k] - old, out);
-                    old = s->data[k];
+                    fputc(((int)s->data[k] + 0x80) - old, out);
+                    old = (int)s->data[k] + 0x80;
                 }
             }
             free(s);
