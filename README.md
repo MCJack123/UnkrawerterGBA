@@ -1,5 +1,14 @@
 # UnkrawerterGBA
-A tool to rip music from Gameboy Advance games that use the Krawall sound engine. Right now this is very WIP, and you'll need some technical know-how to get it working. I plan to update it so that it can a) extract & convert in one step, and b) automatically detect Krawall structures in a ROM.
+A tool to rip music from Gameboy Advance games that use the Krawall sound engine. Right now this is very WIP, and you'll likely need some technical know-how to get it working. I plan to update it so that it can detect, extract & convert in one step.
+
+## `find_krawall_offsets`
+This tool automatically detects the necessary offsets for UnkrawerterGBA in a ROM file. This should work pretty well, but I can't guarantee the effectiveness of it yet. (It's been able to successfully find all of the offsets in my ROM.)
+
+### Compiling
+`$ gcc -o find_krawall_offsets find_krawall_offsets.cpp`
+
+### Usage
+`find_krawall_offsets` expects at least one argument with the path to the ROM file to search through. You can also give it an optional second argument that specifies the minimum number of consecutive addresses in a list that are required to detect it. This is set to 4 by default, but you'll need to set it lower for any modules with less than 4 patterns (my ROM had one of those). You can also give it a third argument which can be anything, and whose presence will tell the program to show all detected offsets with their type. This can be useful if you're having trouble finding all of the offsets and want to see what addresses were detected with what type.
 
 ## `extract_krawall_data`
 This tool extracts data of various types from the specified offsets in a ROM into separate files. This prepares the data to be converted into a suitable format.
@@ -29,8 +38,8 @@ This tool converts the extracted data from `extract_krawall_data` into an XM mod
 
 For example, running `create_xm_from_krawall Module00.bin Module00.xm -p Module00Pattern*.bin -s Sample*.bin -i Instrument*.bin` will create a new XM module `Module00.xm` from the module binary `Module00.bin`, using all of the previously extracted patterns, samples, and instruments.
 
-## Finding Krawall data structures in ROMs
-Since finding the necessary structures in ROMs is not available yet, you will have to do some poking around yourself to find the required offsets. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files.
+## Finding Krawall data structures in ROMs manually
+If you desire to find the offsets on your own (such as if the automatic finder isn't working properly), you can search through the ROM for the offsets manually. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files.
 
 ### Modules
 Modules are probably the easiest structure to locate in a ROM. Search for a block of at least 256 bytes of 0's. Just before this block, check for a chunk of bytes that are ascending from 0. Before that, look for a byte that will likely be 8, as well as another byte that should tell you the number of bytes in that ascending chunk. At the end of the block of 0's, the first byte will likely be 0x80 (but don't rely on it). The next byte should be below 10, and the byte after that should be a reasonable BPM (probably 60 <= n <= 180). The next 6 bytes should be either 1 or 0, with the last byte definitely being 0. Lastly, there will be a list of 4-byte addresses in the decoded form `0x08xxxxxx`, or `xx xx xx 08` in the hex editor.
