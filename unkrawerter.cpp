@@ -215,7 +215,14 @@ void readSampleToWAV(FILE* fp, uint32_t offset, const char * filename) {
 }
 
 extern "C" {
-    typedef struct __attribute__ ((packed)) {
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#define PACKED 
+#endif
+#ifdef __GNUC__
+#define PACKED __attribute__ ((packed))
+#endif
+    typedef struct PACKED {
         uint32_t 	    loopLength;
         uint32_t    	size;
         uint32_t    	c2Freq;
@@ -228,11 +235,11 @@ extern "C" {
         signed char  	data[1];
     } Sample;
 
-    typedef struct __attribute__ ((packed)) {
+    typedef struct PACKED {
         unsigned short	coord, inc;
     } EnvNode;
 
-    typedef struct __attribute__ ((packed)) {
+    typedef struct PACKED {
         EnvNode			nodes[ 12 ];
         unsigned char	max;
         unsigned char	sus;
@@ -241,7 +248,7 @@ extern "C" {
     } Envelope;
 
 
-    typedef struct __attribute__ ((packed)) {
+    typedef struct PACKED {
         unsigned short	samples[ 96 ];
 
         Envelope		envVol;
@@ -254,13 +261,13 @@ extern "C" {
         unsigned char	vibRate;
     } Instrument;
 
-    typedef struct __attribute__ ((packed)) {
+    typedef struct PACKED {
         unsigned short 	index[ 16 ];
         unsigned short	rows;
         unsigned char 	data[1];
     } Pattern;
 
-    typedef struct __attribute__ ((packed)) {
+    typedef struct PACKED {
         unsigned char 	channels;
         unsigned char 	numOrders;
         unsigned char	songRestart;
@@ -284,6 +291,12 @@ extern "C" {
 
         const Pattern* 	patterns[1];
     } Module;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+#ifdef PACKED
+#undef PACKED
+#endif
 }
 
 Pattern * readPatternFile(FILE* fp, uint32_t offset) {
