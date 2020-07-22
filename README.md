@@ -1,22 +1,38 @@
 # UnkrawerterGBA
-A tool to rip music from Gameboy Advance games that use the Krawall sound engine. Right now this is very WIP, and you'll likely need some technical know-how to get it working. I plan to update it so that it can detect, extract & convert in one step.
+A tool to rip music from Gameboy Advance games that use the Krawall sound engine. Right now this is in beta, and you may need some technical know-how to get it fully working.
 
-## `find_krawall_offsets`
+## Compiling
+GCC: `g++ -std=c++11 -o UnkrawerterGBA unkrawerter.cpp`
+Microsoft Visual C++: `cl /EHsc /FeUnkrawerterGBA.exe unkrawerter.cpp`
+
+## Usage
+Jut run the program from the command line with the path to the ROM as the first argument. You can also specify a second argument for the output directory (defaults to the current one), a third argument for the address count threshold (defaults to 4), and a fourth argument for verbose mode. It will output one XM module file per song in the form `Module<n>.xm` in the output directory.
+
+### Threshold argument
+UnkrawallGBA searches for audio files by looking through the ROM for lists of pointers to structures with the audio data. These lists can either be the master instrument list, the master sample list, or a module's list of patterns. By default, UnkrawallGBA ignores any lists with less than four addresses. This is to avoid detecting single variables that are unrelated to Krawall, speeding up detection time. But some songs may have less than four patterns, and so they won't be detected with the default threshold. You can adjust this number to detect modules with fewer patterns, but it may take longer for it to filter out all of the addresses that are not related to Krawall.
+
+### Verbose mode
+Enable verbose mode to show all of the detected addresses and their types. This can be useful if UnkrawallGBA isn't detecting one of the required lists properly.
+
+## Legacy tools
+These were the original three tools used before they were combined into one program. They remain here for legacy purposes and debugging.
+
+### `find_krawall_offsets`
 This tool automatically detects the necessary offsets for UnkrawerterGBA in a ROM file. This should work pretty well, but I can't guarantee the effectiveness of it yet. (It's been able to successfully find all of the offsets in my ROM.)
 
-### Compiling
+#### Compiling
 `$ gcc -o find_krawall_offsets find_krawall_offsets.cpp`
 
-### Usage
+#### Usage
 `find_krawall_offsets` expects at least one argument with the path to the ROM file to search through. You can also give it an optional second argument that specifies the minimum number of consecutive addresses in a list that are required to detect it. This is set to 4 by default, but you'll need to set it lower for any modules with less than 4 patterns (my ROM had one of those). You can also give it a third argument which can be anything, and whose presence will tell the program to show all detected offsets with their type. This can be useful if you're having trouble finding all of the offsets and want to see what addresses were detected with what type.
 
-## `extract_krawall_data`
+### `extract_krawall_data`
 This tool extracts data of various types from the specified offsets in a ROM into separate files. This prepares the data to be converted into a suitable format.
 
-### Compilation
+#### Compilation
 `$ gcc -o extract_krawall_data extract_krawall_data.c`
 
-### Usage
+#### Usage
 `extract_krawall_data` expects the first argument to be the path to the ROM file to read from. After that, each argument is an offset in hexadecimal with a letter prefix specifying what kind of data to extract. Here is the current list of prefixes:
 * `m`: Reads a module structure and its associated patterns.
 * `l`: Reads samples from a list of sample addresses.
@@ -27,26 +43,26 @@ The resulting files will be output in the current directory in the form `<type><
 
 For example, running `extract_krawall_data game.gba m12ab56 l15e69c` will extract the module located in `game.gba` at offset 0x12ab56, the patterns that are used by the module, and the samples in the list located at offset 0x15e69c.
 
-## `create_xm_from_krawall`
+### `create_xm_from_krawall`
 This tool converts the extracted data from `extract_krawall_data` into an XM module file that can by played by a tracker program that supports XM modules, such as OpenMPT.
 
-### Compiling
+#### Compiling
 `$ g++ -o create_xm_from_krawall create_xm_from_krawall.cpp`
 
-### Usage
+#### Usage
 `create_xm_from_krawall` expects two initial arguments: the path to the previously extracted module binary, and the output XM file. After that, it expects paths to either pattern files, sample files, or instrument files. The `-p`, `-s`, and `-i` flags will tell it that the following files are patterns, samples, or instruments, respectively, until the next flag is specified or there are no more arguments. You must specify one of these flags after the output argument. There must be at least one of each type, and if you don't specify all of the files needed the program will crash.
 
 For example, running `create_xm_from_krawall Module00.bin Module00.xm -p Module00Pattern*.bin -s Sample*.bin -i Instrument*.bin` will create a new XM module `Module00.xm` from the module binary `Module00.bin`, using all of the previously extracted patterns, samples, and instruments.
 
-## Finding Krawall data structures in ROMs manually
+### Finding Krawall data structures in ROMs manually
 If you desire to find the offsets on your own (such as if the automatic finder isn't working properly), you can search through the ROM for the offsets manually. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files.
 
-### Modules
+#### Modules
 Modules are probably the easiest structure to locate in a ROM. Search for a block of at least 256 bytes of 0's. Just before this block, check for a chunk of bytes that are ascending from 0. Before that, look for a byte that will likely be 8, as well as another byte that should tell you the number of bytes in that ascending chunk. At the end of the block of 0's, the first byte will likely be 0x80 (but don't rely on it). The next byte should be below 10, and the byte after that should be a reasonable BPM (probably 60 <= n <= 180). The next 6 bytes should be either 1 or 0, with the last byte definitely being 0. Lastly, there will be a list of 4-byte addresses in the decoded form `0x08xxxxxx`, or `xx xx xx 08` in the hex editor.
 
 If the block you found matches this description: congratulations, you found a module structure! The offset you need is the address of the first byte that was probably 8, before the increasing bytes and 0 chunk.
 
-### Sample lists & instrument lists
+#### Sample lists & instrument lists
 Krawall stores the list of samples & instruments in two blocks of data as pointer arrays. You will need to look for chunks of data that are in the form `xx xx xx 08 xx xx xx 08 xx xx xx 08 xx xx xx 08` in each row. This command should help you find a few candidates:
 ```sh
 xxd ../2403\ -\ 3\ in\ 1\ -\ Life,\ Yahtzee,\ Payday\ \(U\)\(Trashman\).gba | grep -E '[0-9a-f][0-9a-f][0-9a-f][0-9a-f] [1-9a-f][0-9a-f]08 .... ..08 .... ..08 .... ..08'
@@ -55,7 +71,7 @@ Rule out any lines that are not in chunks of at least 4 lines, or are filled wit
 
 An instrument structure will likely have a long string of the same byte (the first instrument will probably have lots of 0's or 1's). A sample structure will likely not have more than 16 bytes less than 0, and lots of bytes in the range 0x70-0x90 in the beginning. Use your findings to determine which block corresponds with what structure type.
 
-### Finding sample lists through an audio editor
+#### Finding sample lists through an audio editor
 A simpler way to find sample lists is to use an audio editor to load the ROM as a raw audio file. I will be detailing how to do this through Audacity; if using another editor, you will have to adapt these instructions to work with that editor.
 
 First, go to File => Import => Raw Data... and browse to the ROM file you are ripping. Set the audio format to 8-bit unsigned PCM, mono, with any sample rate (though 16384 is preferred). Then search through the file for the first region that resembles an audio track (it shouldn't be pure noise). Place the cursor at the beginning, and zoom in until you can see the individual sample dots. Then move the cursor to the very first sample of the audio.
