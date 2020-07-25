@@ -1,9 +1,10 @@
 # UnkrawerterGBA
-A tool to rip music from Gameboy Advance games that use the Krawall sound engine. Right now this is in beta, and you may need some technical know-how to get it fully working.
+A tool to rip music from Gameboy Advance games that use the Krawall sound engine.
 
 ## Compiling
-GCC: `g++ -std=c++11 -o UnkrawerterGBA unkrawerter.cpp`
-Microsoft Visual C++: `cl /EHsc /FeUnkrawerterGBA.exe unkrawerter.cpp`
+The latest version can be downloaded precompiled on the Releases tab, or you can compile it yourself:
+* GCC/Clang: `g++ -std=c++11 -o UnkrawerterGBA unkrawerter.cpp`  
+* Microsoft Visual C++: `cl /EHsc /FeUnkrawerterGBA.exe unkrawerter.cpp`
 
 ## Usage
 Jut run the program from the command line with the path to the ROM as the first argument. You can also specify a second argument for the output directory (defaults to the current one), a third argument for the address count threshold (defaults to 4), and a fourth argument for verbose mode. It will output one XM module file per song in the form `Module<n>.xm` in the output directory.
