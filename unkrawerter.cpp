@@ -1,6 +1,6 @@
 /*
  * UnkrawerterGBA
- * Version 1.0
+ * Version 1.1
  * 
  * This program automatically extracts music files from Gameboy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM module
@@ -477,8 +477,8 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
     fputc(0, out); // 2-byte padding
     unsigned short pnum = patternCount;
     fwrite(&pnum, 2, 1, out);
-    pnum = instrumentOffsets.size();
-    fwrite(&pnum, 2, 1, out);
+    uint32_t instrumentSizePos = ftell(out); // we'll get back to this later
+    fputcn(0, 2, out);
     fputc((mod->flagLinearSlides ? 1 : 0), out);
     fputc(0, out); // 2-byte padding
     fputc(mod->initSpeed, out);
@@ -486,6 +486,7 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
     fputc(mod->initBPM, out);
     fputc(0, out); // 2-byte padding
     fwrite(mod->order, 1, 256, out);
+    std::vector<unsigned short> instrumentList; // used to hold the instruments used so we can remove unnecessary instruments
     // Write each pattern
     for (int i = 0; i < patternCount; i++) {
         // Write pattern header
@@ -587,14 +588,39 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                 thisrow[channel].effectop = effectop;
             }
             // Since Krawall doesn't need to fill all channels and XM does, convert that out
-            for (int i = 0; i < mod->channels; i++) {
-                if (thisrow[i].xmflag) { // If this was set, the note should be added
-                    fputc(thisrow[i].xmflag, out);
-                    if (thisrow[i].xmflag & 0x01) fputc(thisrow[i].note, out);
-                    if (thisrow[i].xmflag & 0x02) fputc(thisrow[i].instrument & 0x7F, out);
-                    if (thisrow[i].xmflag & 0x04) fputc(thisrow[i].volume, out);
-                    if (thisrow[i].xmflag & 0x08) fputc(thisrow[i].effect, out);
-                    if (thisrow[i].xmflag & 0x10) fputc(thisrow[i].effectop, out);
+            for (int j = 0; j < mod->channels; j++) {
+                if (thisrow[j].xmflag) { // If this was set, the note should be added
+                    fputc(thisrow[j].xmflag, out);
+                    if (thisrow[j].xmflag & 0x01) fputc(thisrow[j].note, out);
+                    if (thisrow[j].xmflag & 0x02) {
+                        if (thisrow[j].instrument == 0) fputc(0, out);
+                        else {
+                            // Convert the instrument number so we can reduce the number of instruments
+                            // Check if the instrument number is already in the list
+                            unsigned char myInstrument = 0;
+                            for (unsigned char k = 0; k < instrumentList.size(); k++) if (instrumentList[k] == thisrow[j].instrument - 1) {
+                                myInstrument = k + 1;
+                                break;
+                            }
+                            // If the instrument wasn't already added to the list, then add it
+                            if (myInstrument == 0) {
+                                // Instruments are listed as 8-bit numbers, so die if there are too many instruments
+                                if (instrumentList.size() >= 254) {
+                                    fprintf(stderr, "Error: Too many instruments in current pattern, cannot continue.\n");
+                                    for (int l = 0; l < patternCount; l++) free((void*)mod->patterns[l]);
+                                    free(mod);
+                                    fclose(out);
+                                    return 3;
+                                }
+                                instrumentList.push_back(thisrow[j].instrument - 1);
+                                myInstrument = instrumentList.size();
+                            }
+                            fputc(myInstrument, out);
+                        }
+                    }
+                    if (thisrow[j].xmflag & 0x04) fputc(thisrow[j].volume, out);
+                    if (thisrow[j].xmflag & 0x08) fputc(thisrow[j].effect, out);
+                    if (thisrow[j].xmflag & 0x10) fputc(thisrow[j].effectop, out);
                 } else fputc(0x80, out); // Empty note (do nothing this row)
             }
         }
@@ -606,9 +632,14 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
         fwrite(&size, 2, 1, out);
         fseek(out, endPos, SEEK_SET);
     }
-    // Write all of the instruments
-    // In the future it may be worth it to optimize this so we don't write unused instruments
-    for (int i = 0; i < instrumentOffsets.size(); i++) {
+    // Write the total number of instruments used in the module
+    uint32_t endPos = ftell(out);
+    fseek(out, instrumentSizePos, SEEK_SET);
+    pnum = instrumentList.size();
+    fwrite(&pnum, 2, 1, out);
+    fseek(out, endPos, SEEK_SET);
+    // Write all of the instruments used by the module
+    for (unsigned short i : instrumentList) {
         // Read the instrument info
         Instrument instr = readInstrumentFile(fp, instrumentOffsets[i]);
         // Find all of the unique samples
@@ -628,26 +659,27 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
         if (snum == 0) continue; // XM spec says if there's no samples then skip the rest
         // Convert arbitrary sample numbers in the sample map to 0, 1, 2, etc.
         // This is because Krawall has a global sample map, while XM counts samples per instrument
-        std::map<unsigned short, unsigned short> sample_conversion;
-        for (unsigned short i = 0; i < snum; i++) sample_conversion[samples[i]] = i + 1;
-        for (int i = 0; i < 96; i++) instr.samples[i] = sample_conversion[instr.samples[i]];
+        std::map<unsigned short, unsigned char> sample_conversion;
+        unsigned char new_samples[96];
+        for (unsigned char i = 0; i < snum; i++) sample_conversion[samples[i]] = i;
+        for (int i = 0; i < 96; i++) new_samples[i] = sample_conversion[instr.samples[i]];
         // Write instrument data
         fputc(40, out);
         fputcn(0, 3, out); // 4-byte padding
-        fwrite(instr.samples, 1, 96, out);
+        fwrite(new_samples, 1, 96, out);
         // Convert envelopes to XM format
         // Turns out we don't even need the inc field! Everything's packed in coord.
         unsigned short tmp;
-        for (int i = 0; i < 12; i++) {
-            tmp = instr.envVol.nodes[i].coord & 0x1ff;
+        for (int j = 0; j < 12; j++) {
+            tmp = instr.envVol.nodes[j].coord & 0x1ff;
             fwrite(&tmp, 2, 1, out);
-            tmp = instr.envVol.nodes[i].coord >> 9;
+            tmp = instr.envVol.nodes[j].coord >> 9;
             fwrite(&tmp, 2, 1, out);
         }
-        for (int i = 0; i < 12; i++) {
-            tmp = instr.envPan.nodes[i].coord & 0x1ff;
+        for (int j = 0; j < 12; j++) {
+            tmp = instr.envPan.nodes[j].coord & 0x1ff;
             fwrite(&tmp, 2, 1, out);
-            tmp = instr.envPan.nodes[i].coord >> 9;
+            tmp = instr.envPan.nodes[j].coord >> 9;
             fwrite(&tmp, 2, 1, out);
         }
         // Here's a whole bunch of envelope parameters to write
@@ -696,7 +728,7 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
             fputc(s->relativeNote, out);
             fputc(0, out);
             memset(name, ' ', 22);
-            snprintf(name, 22, "Sample%d", i);
+            snprintf(name, 22, "Sample%d", samples[j]);
             fwrite(name, 1, 22, out);
             sarr.push_back(s); // Push the read sample back so we don't have to allocate & read it again
         }
@@ -737,7 +769,7 @@ bool fstr(FILE* fp, const char * str) {
     while (!feof(fp)) {
         if (!*ptr) return true;
         else if (fgetc(fp) == *ptr) ptr++;
-        else str = ptr;
+        else ptr = str;
     }
     return false;
 }
