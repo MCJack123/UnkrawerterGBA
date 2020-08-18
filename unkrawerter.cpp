@@ -1,6 +1,6 @@
 /*
  * UnkrawerterGBA
- * Version 1.1
+ * Version 2.0
  * 
  * This program automatically extracts music files from Gameboy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM module
@@ -40,7 +40,7 @@
 #include <map>
 
 // Maps type numbers detected in searchForOffsets to strings for display (only used in verbose mode)
-const char * typemap[] = {
+static const char * typemap[] = {
     "unknown",
     "module",
     "sample",
@@ -50,6 +50,10 @@ const char * typemap[] = {
     "instrument or sample",
     "any"
 };
+
+// Stores the Krawall version (used to determine some conversion parameters)
+// This defaults to the latest version, but ROMs using versions before 2004-07-07 MUST set this
+static uint32_t version = 0x20050421;
 
 // Structure to hold results of offset search
 struct OffsetSearchResult {
@@ -61,13 +65,17 @@ struct OffsetSearchResult {
     std::vector<uint32_t> modules;
 };
 
+void unkrawerter_setVersion(uint32_t ver) {
+    version = ver;
+}
+
 // Searches a ROM file pointer for offsets to modules, an instrument list, and a sample list.
 // This looks for sets of 4-byte aligned addresses in the form 0x08xxxxxx or 0x09xxxxxx
 // Once the sets are found, their types are determined by dereferencing the addresses and checking
 // whether the data stored therein is consistent with the structure type.
 // Sets that don't match exactly one type are discarded.
 // Returns a structure with the addresses to the instrument & sample lists, as well as all modules.
-OffsetSearchResult searchForOffsets(FILE* fp, int threshold = 4, bool verbose = false) {
+OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, bool verbose = false) {
     OffsetSearchResult retval;
     fseek(fp, 0, SEEK_END);
     uint32_t romSize = ftell(fp); // Store the ROM's size so addresses that go over are ignored
@@ -123,7 +131,8 @@ OffsetSearchResult searchForOffsets(FILE* fp, int threshold = 4, bool verbose = 
             if (fgetc(fp)) {possible_mask &= 0b110; break;}
             fseek(fp, 28, SEEK_CUR);
             uint16_t tmp2 = 0;
-            fread(&tmp2, 2, 1, fp);
+            if (version < 0x20040707) tmp2 = fgetc(fp);
+            else fread(&tmp2, 2, 1, fp);
             if (tmp2 > 256 || (tmp2 & 7)) {possible_mask &= 0b110; break;}
         } while (0);
 
@@ -186,12 +195,12 @@ OffsetSearchResult searchForOffsets(FILE* fp, int threshold = 4, bool verbose = 
         printf("> Found module at address %08X\n", retval.modules[i]);
     }
 
-    retval.success = retval.instrumentAddr && retval.sampleAddr && !retval.modules.empty();
+    retval.success = retval.sampleAddr && !retval.modules.empty();
     return retval;
 }
 
-// This can be used later?
-void readSampleToWAV(FILE* fp, uint32_t offset, const char * filename) {
+// Reads a Krawall sample from a ROM and writes it to a WAV file
+void unkrawerter_readSampleToWAV(FILE* fp, uint32_t offset, const char * filename) {
     fseek(fp, offset, SEEK_SET);
     unsigned long loopLength = 0, end = 0;
     fread(&loopLength, 4, 1, fp);
@@ -267,6 +276,7 @@ extern "C" {
     } Instrument;
 
     typedef struct PACKED {
+        unsigned short  length;
         unsigned short 	index[ 16 ];
         unsigned short	rows;
         unsigned char 	data[1];
@@ -305,7 +315,7 @@ extern "C" {
 }
 
 // Read a pattern from a file pointer to a Pattern structure pointer
-Pattern * readPatternFile(FILE* fp, uint32_t offset) {
+static Pattern * readPatternFile(FILE* fp, uint32_t offset) {
     fseek(fp, offset + 32, SEEK_SET);
     std::vector<uint8_t> fileContents;
     unsigned short rows = 0;
@@ -332,7 +342,8 @@ Pattern * readPatternFile(FILE* fp, uint32_t offset) {
         }
     }
     fseek(fp, offset, SEEK_SET);
-    Pattern * retval = (Pattern*)malloc(34 + fileContents.size());
+    Pattern * retval = (Pattern*)malloc(36 + fileContents.size());
+    retval->length = fileContents.size();
     fread(retval->index, 2, 16, fp);
     fseek(fp, 2, SEEK_CUR);
     retval->rows = rows;
@@ -340,15 +351,55 @@ Pattern * readPatternFile(FILE* fp, uint32_t offset) {
     return retval;
 }
 
+static Pattern * readPattern2003File(FILE* fp, uint32_t offset) {
+    fseek(fp, offset + 32, SEEK_SET);
+    std::vector<uint8_t> fileContents;
+    unsigned short rows = fgetc(fp);
+    // We don't need to do full decoding; decode just enough to understand the size of the pattern
+    for (int row = 0; row < rows; row++) {
+        for (;;) {
+            unsigned char follow = fgetc(fp);
+            fileContents.push_back(follow);
+            if (!follow) break;
+            if (follow & 0x20) {
+                unsigned char note = fgetc(fp);
+                fileContents.push_back(note);
+                fileContents.push_back(fgetc(fp));
+                //if (note & 0x80) fileContents.push_back(fgetc(fp));
+            }
+            if (follow & 0x40) {
+                fileContents.push_back(fgetc(fp));
+            }
+            if (follow & 0x80) {
+                fileContents.push_back(fgetc(fp));
+                fileContents.push_back(fgetc(fp));
+            }
+        }
+    }
+    fseek(fp, offset, SEEK_SET);
+    Pattern * retval = (Pattern*)malloc(36 + fileContents.size());
+    retval->length = fileContents.size();
+    fread(retval->index, 2, 16, fp);
+    retval->rows = rows;
+    memcpy(retval->data, &fileContents[0], fileContents.size());
+    return retval;
+}
+
 // Read a module from a file pointer to a Module structure pointer
 // This reads all its patterns as well
-Module * readModuleFile(FILE* fp, uint32_t offset) {
+static Module * readModuleFile(FILE* fp, uint32_t offset) {
     Module * retval = (Module*)malloc(sizeof(Module));
     memset(retval, 0, sizeof(Module));
     fseek(fp, offset, SEEK_SET);
     fread(retval, 364, 1, fp);
+    int markerAdd = 0;
+    for (int i = 0; i < retval->numOrders; i++) {
+        retval->order[i] = retval->order[i+markerAdd];
+        while (retval->order[i] == 254) {markerAdd++; retval->order[i] = retval->order[i+markerAdd];}
+    }
+    retval->numOrders -= markerAdd;
     unsigned char maxPattern = 0;
-    for (int i = 0; i < retval->numOrders; i++) maxPattern = std::max(maxPattern, retval->order[i]);
+    for (int i = 0; i < retval->numOrders; i++) if (retval->order[i] != 254) maxPattern = std::max(maxPattern, retval->order[i]);
     Module * retval2 = (Module*)malloc(sizeof(Module) + sizeof(Pattern*) * (maxPattern + 1));
     memcpy(retval2, retval, sizeof(Module));
     uint32_t addr = 0;
@@ -357,13 +408,14 @@ Module * readModuleFile(FILE* fp, uint32_t offset) {
         fread(&addr, 4, 1, fp);
         if (!(addr & 0x08000000) || (addr & 0xf6000000))
             break;
-        retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff);
+        if (version < 0x20040707) retval2->patterns[i] = readPattern2003File(fp, addr & 0x1ffffff);
+        else retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff);
     }
     return retval2;
 }
 
 // Read an instrument from a file pointer to an Instrument structure
-Instrument readInstrumentFile(FILE* fp, uint32_t offset) {
+static Instrument readInstrumentFile(FILE* fp, uint32_t offset) {
     fseek(fp, offset, SEEK_SET);
     Instrument retval;
     fread(&retval, sizeof(retval), 1, fp);
@@ -371,7 +423,7 @@ Instrument readInstrumentFile(FILE* fp, uint32_t offset) {
 }
 
 // Read a sample from a file pointer to a Sample structure pointer
-Sample * readSampleFile(FILE* fp, uint32_t offset) {
+static Sample * readSampleFile(FILE* fp, uint32_t offset) {
     fseek(fp, offset + 4, SEEK_SET);
     uint32_t size = 0;
     fread(&size, 4, 1, fp);
@@ -457,7 +509,12 @@ const std::pair<unsigned short, unsigned char> effectMap[] = {
 
 // Writes a module from a file pointer to a new XM file.
 // XM file format from http://web.archive.org/web/20060809013752/http://pipin.tmd.ns.ac.yu/extra/fileformat/modules/xm/xm.txt
-int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename) {
+int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL) {
+    // Die if there are too many instruments for XM & we're not trimming instruments
+    if (instrumentOffsets.size() > 255 && !trimInstruments) {
+        fprintf(stderr, "Error: This ROM cannot be ripped without trimming instruments.\n");
+        return 10;
+    }
     // Open the XM file
     FILE* out = fopen(filename, "wb");
     if (out == NULL) {
@@ -469,8 +526,21 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
     unsigned char patternCount = 0;
     for (int i = 0; i < mod->numOrders; i++) patternCount = std::max(patternCount, mod->order[i]);
     patternCount++;
+    if (mod->flagInstrumentBased && instrumentOffsets.empty()) {
+        fprintf(stderr, "Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
+        for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
+        free(mod);
+        fclose(out);
+        return 3;
+    }
     // Write the XM header info
-    fwrite("Extended Module: Krawall conversion  \032UnkrawerterGBA      \x04\x01\x14\x01\0\0", 1, 64, out);
+    if (name == NULL) fwrite("Extended Module: Krawall conversion  \032UnkrawerterGBA      \x04\x01\x14\x01\0\0", 1, 64, out);
+    else {
+        fwrite("Extended Module: ", 1, 17, out);
+        fwrite(name, 1, std::min(strlen(name), (size_t)20), out);
+        for (int i = std::min(strlen(name), (size_t)20); i < 20; i++) fputc(' ', out);
+        fwrite("\032UnkrawerterGBA      \x04\x01\x14\x01\0\0", 1, 27, out);
+    }
     fputc(mod->numOrders, out);
     fputcn(0, 3, out); // 4-byte padding
     fputc(mod->channels, out);
@@ -478,7 +548,8 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
     unsigned short pnum = patternCount;
     fwrite(&pnum, 2, 1, out);
     uint32_t instrumentSizePos = ftell(out); // we'll get back to this later
-    fputcn(0, 2, out);
+    if (trimInstruments) fputcn(0, 2, out);
+    else {pnum = mod->flagInstrumentBased ? instrumentOffsets.size() : sampleOffsets.size(); fwrite(&pnum, 2, 1, out);}
     fputc((mod->flagLinearSlides ? 1 : 0), out);
     fputc(0, out); // 2-byte padding
     fputc(mod->initSpeed, out);
@@ -499,6 +570,7 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
         const unsigned char * data = mod->patterns[i]->data;
         Note * thisrow = (Note*)calloc(mod->channels, sizeof(Note)); // stores the current row's notes
         unsigned char warnings = 0; // for S3M/MPT warnings, we only warn once per pattern
+        unsigned char * s3memory = new unsigned char[mod->channels]; // for channel memory for S3M-specific commands
         for (int row = 0; row < mod->patterns[i]->rows; row++) {
             memset(thisrow, 0, sizeof(Note) * mod->channels); // Zero so we can check the values for 0 later
             for (;;) {
@@ -513,7 +585,10 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                     xmflag |= 0x03;
                     note = *data++;
                     instrument = *data++;
-                    if (note & 0x80) { // If the note > 128, the instrument field is 2 bytes long
+                    if (version < 0x20040707) { // For versions before 2004-07-07, note is high 7 bits & instrument is low 9 bits
+                        instrument |= (note & 1) << 8;
+                        note >>= 1;
+                    } else if (note & 0x80) { // For versions starting with 2004-07-07, if the note > 128, the instrument field is 2 bytes long
                         instrument |= *data++ << 8;
                         note &= 0x7f;
                     }
@@ -535,6 +610,8 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                         effect = 0;
                         effectop = 0;
                     } else if (effect == 6) { // S3M volume slide
+                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
+                        s3memory[channel] = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine decrease
                             effect = 0x0E;
                             effectop = 0xB0 | (effectop & 0x0F);
@@ -545,6 +622,8 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                             effect = 0x0A;
                         }
                     } else if (effect == 11) { // S3M porta down
+                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
+                        s3memory[channel] = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine
                             effect = 0x0E;
                             effectop = 0x20 | (effectop & 0x0F);
@@ -555,6 +634,8 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                             effect = 0x02;
                         }
                     } else if (effect == 15) { // S3M porta up
+                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
+                        s3memory[channel] = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine
                             effect = 0x0E;
                             effectop = 0x10 | (effectop & 0x0F);
@@ -564,14 +645,44 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                         } else { // normal
                             effect = 0x01;
                         }
+                    } else if (effect == 23) { // S3M volume slide + vibrato
+                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
+                        s3memory[channel] = effectop;
+                        // XM doesn't have a Vol+Vib command, so put the volume slide command in the volume column & vibrato in the effects column
+                        if ((effectop & 0xF0) == 0xF0) { // fine decrease
+                            if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x80 | (effectop & 0x0F);}
+                            effect = 0x04;
+                            effectop = 0;
+                        } else if ((effectop & 0x0F) == 0x0F) { // fine increase
+                            if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x90 | (effectop >> 4);}
+                            effect = 0x04;
+                            effectop = 0;
+                        } else { // normal volume slide
+                            effect = 0x06;
+                        }
+                    } else if (effect == 24) { // S3M volume slide + porta
+                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
+                        s3memory[channel] = effectop;
+                        // XM doesn't have a Vol+Porta command, so put the volume slide command in the volume column & portamento in the effects column
+                        if ((effectop & 0xF0) == 0xF0) { // fine decrease
+                            if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x80 | (effectop & 0x0F);}
+                            effect = 0x03;
+                            effectop = 0;
+                        } else if ((effectop & 0x0F) == 0x0F) { // fine increase
+                            if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x90 | (effectop >> 4);}
+                            effect = 0x03;
+                            effectop = 0;
+                        } else { // normal volume slide
+                            effect = 0x06;
+                        }
                     } else if (effect == 25 || effect == 26 || effect == 31) { // Unsupported S3M effects
-                        if (!(warnings & 0x02)) {warnings |= 0x02; printf("Warning: Pattern %d uses an effect specific to S3M. It will not play correctly.\n", i);}
+                        if (!(warnings & 0x02)) {warnings |= 0x02; printf("Warning: Pattern %d uses an S3M effect that isn't compatible with XM. It will not play correctly.\n", i);}
                         xmflag &= ~0x18;
                         effect = 0;
                         effectop = 0;
                     } else { // Other effects
                         // Warn if MPT-only
-                        if (effect == 35 || effect == 40 && !(warnings & 0x01)) {warnings |= 0x01; printf("Warning: Pattern %d uses an effect specific to OpenMPT. It will not play correctly in other trackers.\n", i);}
+                        if ((effect == 35 || effect == 40) && !(warnings & 0x01)) {warnings |= 0x01; printf("Warning: Pattern %d uses an effect specific to OpenMPT. It may not play correctly in other trackers.\n", i);}
                         xmeffect = xmeffect | (effectop & effectmask);
                         effect = xmeffect >> 8;
                         effectop = xmeffect & 0xFF;
@@ -594,6 +705,7 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
                     if (thisrow[j].xmflag & 0x01) fputc(thisrow[j].note, out);
                     if (thisrow[j].xmflag & 0x02) {
                         if (thisrow[j].instrument == 0) fputc(0, out);
+                        else if (!trimInstruments) fputc(thisrow[j].instrument & 0x7F, out);
                         else {
                             // Convert the instrument number so we can reduce the number of instruments
                             // Check if the instrument number is already in the list
@@ -625,6 +737,7 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
             }
         }
         free(thisrow);
+        delete[] s3memory;
         // Write the size of the packed pattern data
         uint32_t endPos = ftell(out);
         fseek(out, sizePos, SEEK_SET);
@@ -633,86 +746,138 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
         fseek(out, endPos, SEEK_SET);
     }
     // Write the total number of instruments used in the module
-    uint32_t endPos = ftell(out);
-    fseek(out, instrumentSizePos, SEEK_SET);
-    pnum = instrumentList.size();
-    fwrite(&pnum, 2, 1, out);
-    fseek(out, endPos, SEEK_SET);
-    // Write all of the instruments used by the module
-    for (unsigned short i : instrumentList) {
-        // Read the instrument info
-        Instrument instr = readInstrumentFile(fp, instrumentOffsets[i]);
-        // Find all of the unique samples
-        std::vector<unsigned short> samples;
-        samples.resize(96);
-        samples.erase(std::unique_copy(instr.samples, instr.samples + 96, samples.begin()), samples.end());
-        unsigned short snum = samples.size();
-        // Start writing instrument header
-        fputc(snum == 0 ? 29 : 252, out);
-        fputcn(0, 3, out); // 4-byte padding
-        char name[22];
-        memset(name, 0, 22);
-        snprintf(name, 22, "Instrument%d", i);
-        fwrite(name, 1, 22, out);
-        fputc(0, out);
-        fwrite(&snum, 2, 1, out);
-        if (snum == 0) continue; // XM spec says if there's no samples then skip the rest
-        // Convert arbitrary sample numbers in the sample map to 0, 1, 2, etc.
-        // This is because Krawall has a global sample map, while XM counts samples per instrument
-        std::map<unsigned short, unsigned char> sample_conversion;
-        unsigned char new_samples[96];
-        for (unsigned char i = 0; i < snum; i++) sample_conversion[samples[i]] = i;
-        for (int i = 0; i < 96; i++) new_samples[i] = sample_conversion[instr.samples[i]];
-        // Write instrument data
-        fputc(40, out);
-        fputcn(0, 3, out); // 4-byte padding
-        fwrite(new_samples, 1, 96, out);
-        // Convert envelopes to XM format
-        // Turns out we don't even need the inc field! Everything's packed in coord.
-        unsigned short tmp;
-        for (int j = 0; j < 12; j++) {
-            tmp = instr.envVol.nodes[j].coord & 0x1ff;
-            fwrite(&tmp, 2, 1, out);
-            tmp = instr.envVol.nodes[j].coord >> 9;
-            fwrite(&tmp, 2, 1, out);
+    if (trimInstruments) {
+        uint32_t endPos = ftell(out);
+        fseek(out, instrumentSizePos, SEEK_SET);
+        pnum = instrumentList.size();
+        fwrite(&pnum, 2, 1, out);
+        fseek(out, endPos, SEEK_SET);
+    } else if (mod->flagInstrumentBased) for (int i = 0; i < instrumentOffsets.size(); i++) instrumentList.push_back(i); // Add all instruments if not trimming & we're using instruments
+    else for (int i = 0; i < sampleOffsets.size(); i++) instrumentList.push_back(i); // Add all samples if not trimming & not using instruments
+    if (mod->flagInstrumentBased) {
+        // Write all of the instruments used by the module
+        for (unsigned short i : instrumentList) {
+            // Read the instrument info
+            Instrument instr = readInstrumentFile(fp, instrumentOffsets[i]);
+            // Find all of the unique samples
+            std::vector<unsigned short> samples;
+            samples.resize(96);
+            samples.erase(std::unique_copy(instr.samples, instr.samples + 96, samples.begin()), samples.end());
+            unsigned short snum = samples.size();
+            // Start writing instrument header
+            fputc(snum == 0 ? 29 : 252, out);
+            fputcn(0, 3, out); // 4-byte padding
+            char name[22];
+            memset(name, 0, 22);
+            snprintf(name, 22, "Instrument%d", i);
+            fwrite(name, 1, 22, out);
+            fputc(0, out);
+            fwrite(&snum, 2, 1, out);
+            if (snum == 0) continue; // XM spec says if there's no samples then skip the rest
+            // Convert arbitrary sample numbers in the sample map to 0, 1, 2, etc.
+            // This is because Krawall has a global sample map, while XM counts samples per instrument
+            std::map<unsigned short, unsigned char> sample_conversion;
+            unsigned char new_samples[96];
+            for (unsigned char i = 0; i < snum; i++) sample_conversion[samples[i]] = i;
+            for (int i = 0; i < 96; i++) new_samples[i] = sample_conversion[instr.samples[i]];
+            // Write instrument data
+            fputc(40, out);
+            fputcn(0, 3, out); // 4-byte padding
+            fwrite(new_samples, 1, 96, out);
+            // Convert envelopes to XM format
+            // Turns out we don't even need the inc field! Everything's packed in coord.
+            unsigned short tmp;
+            for (int j = 0; j < 12; j++) {
+                tmp = instr.envVol.nodes[j].coord & 0x1ff;
+                fwrite(&tmp, 2, 1, out);
+                tmp = instr.envVol.nodes[j].coord >> 9;
+                fwrite(&tmp, 2, 1, out);
+            }
+            for (int j = 0; j < 12; j++) {
+                tmp = instr.envPan.nodes[j].coord & 0x1ff;
+                fwrite(&tmp, 2, 1, out);
+                tmp = instr.envPan.nodes[j].coord >> 9;
+                fwrite(&tmp, 2, 1, out);
+            }
+            // Here's a whole bunch of envelope parameters to write
+            fputc(instr.envVol.max + 1, out);
+            fputc(instr.envPan.max + 1, out);
+            fputc(instr.envVol.sus, out);
+            fputc(instr.envVol.loopStart, out);
+            fputc(instr.envVol.max, out);
+            fputc(instr.envPan.sus, out);
+            fputc(instr.envPan.loopStart, out);
+            fputc(instr.envPan.max, out);
+            fputc(instr.envVol.flags, out);
+            fputc(instr.envPan.flags, out);
+            fputc(instr.vibType, out);
+            fputc(instr.vibSweep, out);
+            fputc(instr.vibDepth, out);
+            fputc(instr.vibRate, out);
+            fwrite(&instr.volFade, 2, 1, out);
+            fputcn(0, 11, out); // Padding as required by XM
+            // Write all of the samples required for this instrument
+            // XM requires all of the headers to be written before the data, so we read
+            // all of the samples in one loop and then write the data in another
+            // Seems inefficient but it's impossible to avoid
+            std::vector<Sample*> sarr;
+            for (int j = 0; j < snum; j++) {
+                if (samples[j] > sampleOffsets.size()) continue; // If the sample isn't present then skip it
+                // Read the sample from the file
+                Sample * s = readSampleFile(fp, sampleOffsets[samples[j]]);
+                // Write the sample header
+                fwrite(&s->size, 4, 1, out);
+                // Loop start has to be computed from the end & length
+                if (s->loopLength == 0) fputcn(0, 4, out);
+                else {
+                    uint32_t start = s->size - s->loopLength;
+                    fwrite(&start, 4, 1, out);
+                }
+                // Some other sample parameters
+                fwrite(&s->loopLength, 4, 1, out);
+                fputc(s->volDefault, out);
+                fputc(s->fineTune, out);
+                fputc((s->loop ? 1 : 0), out);
+                fputc(s->panDefault + 0x80, out);
+                fputc(s->relativeNote, out);
+                fputc(0, out);
+                memset(name, ' ', 22);
+                snprintf(name, 22, "Sample%d", samples[j]);
+                fwrite(name, 1, 22, out);
+                sarr.push_back(s); // Push the read sample back so we don't have to allocate & read it again
+            }
+            // Write the actual sample data
+            for (int j = 0; j < sarr.size(); j++) {
+                Sample * s = sarr[j];
+                // Everything's written as deltas instead of absolute values
+                // We also convert from signed to unsigned here since it has to be unsigned
+                unsigned char old = 0;
+                for (uint32_t k = 0; k < s->size; k++) {
+                    fputc(((int)s->data[k] + 0x80) - old, out);
+                    old = (int)s->data[k] + 0x80;
+                }
+                free(s);
+            }
         }
-        for (int j = 0; j < 12; j++) {
-            tmp = instr.envPan.nodes[j].coord & 0x1ff;
-            fwrite(&tmp, 2, 1, out);
-            tmp = instr.envPan.nodes[j].coord >> 9;
-            fwrite(&tmp, 2, 1, out);
-        }
-        // Here's a whole bunch of envelope parameters to write
-        fputc(instr.envVol.max + 1, out);
-        fputc(instr.envPan.max + 1, out);
-        fputc(instr.envVol.sus, out);
-        fputc(instr.envVol.loopStart, out);
-        fputc(instr.envVol.max, out);
-        fputc(instr.envPan.sus, out);
-        fputc(instr.envPan.loopStart, out);
-        fputc(instr.envPan.max, out);
-        fputc(instr.envVol.flags, out);
-        fputc(instr.envPan.flags, out);
-        fputc(instr.vibType, out);
-        fputc(instr.vibSweep, out);
-        fputc(instr.vibDepth, out);
-        fputc(instr.vibRate, out);
-        fwrite(&instr.volFade, 2, 1, out);
-        fputcn(0, 11, out); // Padding as required by XM
-        // Write all of the samples required for this instrument
-        // XM requires all of the headers to be written before the data, so we read
-        // all of the samples in one loop and then write the data in another
-        // Seems inefficient but it's impossible to avoid
-        std::vector<Sample*> sarr;
-        for (int j = 0; j < snum; j++) {
-            if (samples[j] > sampleOffsets.size()) continue; // If the sample isn't present then skip it
-            // Read the sample from the file
-            Sample * s = readSampleFile(fp, sampleOffsets[samples[j]]);
+    } else {
+        // Not using instruments, so one sample = one instrument
+        for (unsigned short i : instrumentList) {
+            // Basic Instrument header
+            fputc(252, out);
+            fputcn(0, 3, out); // 4-byte padding
+            char name[22];
+            memset(name, 0, 22);
+            snprintf(name, 22, "Instrument%d", i);
+            fwrite(name, 1, 22, out);
+            fputc(0, out);
+            fputc(1, out); // 1 sample
+            fputc(0, out);
+            fputc(40, out);
+            fputcn(0, 3 + 96 + 96 + 16, out); // 4-byte padding + rest of instrument data (all 0)
+            fputcn(0, 11, out); // Padding as required by XM
+            Sample * s = readSampleFile(fp, sampleOffsets[i]);
             // Write the sample header
-            if (s->hq) {
-                uint32_t ssize = s->size / 2;
-                fwrite(&ssize, 4, 1, out);
-            } else fwrite(&s->size, 4, 1, out);
+            fwrite(&s->size, 4, 1, out);
             // Loop start has to be computed from the end & length
             if (s->loopLength == 0) fputcn(0, 4, out);
             else {
@@ -723,33 +888,19 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
             fwrite(&s->loopLength, 4, 1, out);
             fputc(s->volDefault, out);
             fputc(s->fineTune, out);
-            fputc((s->loop ? 1 : 0) | (s->hq ? 4 : 0), out);
+            fputc((s->loop ? 1 : 0), out);
             fputc(s->panDefault + 0x80, out);
             fputc(s->relativeNote, out);
             fputc(0, out);
             memset(name, ' ', 22);
-            snprintf(name, 22, "Sample%d", samples[j]);
+            snprintf(name, 22, "Sample%d", i);
             fwrite(name, 1, 22, out);
-            sarr.push_back(s); // Push the read sample back so we don't have to allocate & read it again
-        }
-        // Write the actual sample data
-        for (int j = 0; j < sarr.size(); j++) {
-            Sample * s = sarr[j];
             // Everything's written as deltas instead of absolute values
-            if (s->hq) { // 16-bit?
-                // Don't have an example of this in the wild (yet?), so support isn't guaranteed
-                signed short old = 0;
-                for (uint32_t k = 0; k < s->size; k+=2) {
-                    fputc(((signed short*)s->data)[k] - old, out);
-                    old = ((signed short*)s->data)[k];
-                }
-            } else { // 8-bit
-                // We also convert from signed to unsigned here since it has to be unsigned
-                unsigned char old = 0;
-                for (uint32_t k = 0; k < s->size; k++) {
-                    fputc(((int)s->data[k] + 0x80) - old, out);
-                    old = (int)s->data[k] + 0x80;
-                }
+            // We also convert from signed to unsigned here since it has to be unsigned
+            unsigned char old = 0;
+            for (uint32_t k = 0; k < s->size; k++) {
+                fputc(((int)s->data[k] + 0x80) - old, out);
+                old = (int)s->data[k] + 0x80;
             }
             free(s);
         }
@@ -762,8 +913,10 @@ int writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t>
     return 0;
 }
 
+#ifndef AS_LIBRARY
+
 // Looks for a string in a file
-bool fstr(FILE* fp, const char * str) {
+static bool fstr(FILE* fp, const char * str) {
     rewind(fp);
     const char * ptr = str;
     while (!feof(fp)) {
@@ -776,22 +929,153 @@ bool fstr(FILE* fp, const char * str) {
 
 int main(int argc, const char * argv[]) {
     if (argc < 2 || strcmp(argv[1], "-h") == 0) {
-        fprintf(stderr, "Usage: %s <rom.gba> [output dir] [search threshold] [verbose]\n", argv[0]);
+        // Help
+        fprintf(stderr, "Usage: %s [options...] <rom.gba>\n"
+                        "Options:\n"
+                        "  -i <address>      Override instrument list address\n"
+                        "  -l <file.txt>     Read module names from a file (one name/line, same format as -n)\n"
+                        "  -m <address>      Add an extra module address to the list\n"
+                        "  -n <addr>=<name>  Assign a name to a module address (max. 20 characters)\n"
+                        "  -o <directory>    Output directory\n"
+                        "  -s <address>      Override sample list address\n"
+                        "  -t <threshold>    Search threshold, lower = slower but finds smaller modules,\n"
+                        "                      higher = faster but misses smaller modules (defaults to 4)\n"
+                        "  -a                Do not trim extra instruments; this will make modules much larger in size!\n"
+                        "  -e                Export samples to WAV files\n"
+                        "  -v                Enable verbose mode\n"
+                        "  -h                Show this help\n", argv[0]);
         return 1;
     }
+    // Command-line argument parsing
+    std::string outputDir;
+    int searchThreshold = 4;
+    bool verbose = false;
+    bool trimInstruments = true;
+    bool exportSamples = false;
+    std::string romPath;
+    uint32_t sampleAddr = 0, instrumentAddr = 0;
+    std::vector<uint32_t> additionalModules;
+    std::map<uint32_t, std::string> nameMap;
+    int nextArg = 0;
+    // Loop through all arguments
+    for (int i = 1; i < argc; i++) {
+        if (nextArg) {
+            switch (nextArg) {
+                case 1: instrumentAddr = atoi(argv[i]); break;
+                case 2: additionalModules.push_back(atoi(argv[i])); break;
+                case 3: outputDir = std::string(argv[i]) + "/"; break;
+                case 4: sampleAddr = atoi(argv[i]); break;
+                case 5: searchThreshold = atoi(argv[i]); break;
+                case 6: {
+                    std::string arg(argv[i]);
+                    size_t pos = arg.find('=');
+                    if (pos == std::string::npos) {
+                        fprintf(stderr, "Error: Invalid argument to -n\n");
+                        return 7;
+                    }
+                    std::string name = arg.substr(pos + 1);
+                    if (name.size() > 20) name.erase(20);
+                    nameMap[std::stoul(arg.substr(0, pos), nullptr, 16) & 0x1ffffff] = name;
+                    break;
+                }
+                case 7: {
+                    FILE* fp = fopen(argv[i], "r");
+                    if (fp == NULL) {
+                        fprintf(stderr, "Error: Invalid argument to -l\n");
+                        return 8;
+                    }
+                    std::string tmpaddr, tmpname;
+                    while (!feof(fp)) {
+                        bool a = false;
+                        tmpaddr.clear();
+                        tmpname.clear();
+                        for (char c = fgetc(fp); c != '\n' && c != EOF; c = fgetc(fp)) {
+                            if (!a && c == '=') a = true;
+                            else if (c >= 0x20) {
+                                if (a) tmpname += c;
+                                else tmpaddr += c;
+                            }
+                        }
+                        if (a && !tmpaddr.empty() && !tmpname.empty()) {
+                            if (tmpname.size() > 20) tmpname.erase(20);
+                            nameMap[std::stoul(tmpaddr, nullptr, 16)] = tmpname;
+                        }
+                    }
+                    fclose(fp);
+                }
+            }
+            nextArg = 0;
+        } else if (argv[i][0] == '-') {
+            for (int j = 1; j < strlen(argv[i]); j++) {
+                switch (argv[i][j]) {
+                    case 'a': trimInstruments = false; break;
+                    case 'e': exportSamples = true; break;
+                    case 'i': nextArg = 1; break;
+                    case 'l': nextArg = 7; break;
+                    case 'm': nextArg = 2; break;
+                    case 'n': nextArg = 6; break;
+                    case 'o': nextArg = 3; break;
+                    case 's': nextArg = 4; break;
+                    case 't': nextArg = 5; break;
+                    case 'v': verbose = true; break;
+                }
+            }
+        } else if (romPath.empty()) romPath = argv[i];
+    }
+    // Die if no ROM file was specified
+    if (romPath.empty()) {
+        fprintf(stderr, "Error: No ROM file specified.\n");
+        return 4;
+    }
     // Open the ROM file
-    FILE* fp = fopen(argv[1], "rb");
+    FILE* fp = fopen(romPath.c_str(), "rb");
     if (fp == NULL) {
-        fprintf(stderr, "Could not open file %s for reading.", argv[1]);
+        fprintf(stderr, "Could not open file %s for reading.", romPath.c_str());
         return 2;
     }
-    // Look for a Krawall signature in the file and warn if one isn't found
-    if (!fstr(fp, "Krawall")) printf("Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
+    // Look for a Krawall signature & version in the file and warn if one isn't found
+    if (!fstr(fp, "$Id: Krawall")) printf("Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
+    else if (fstr(fp, "$Date: ")) {
+        // $Date: 2000/01/01
+        char tmp[11];
+        fread(tmp, 10, 1, fp);
+        tmp[10] = 0;
+        version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+        printf("Krawall version: %08x\n", version);
+    } else {
+        rewind(fp);
+        if (fstr(fp, "$Id: version.h 8 ")) {
+            // $Id: version.h 8 2001-01-01
+            char tmp[11];
+            fread(tmp, 10, 1, fp);
+            tmp[10] = 0;
+            version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+            printf("Krawall version: %08x\n", version);
+        }
+    }
     rewind(fp);
     // Search for the offsets
     OffsetSearchResult offsets;
-    if (argc > 3) offsets = searchForOffsets(fp, atoi(argv[3]), argc > 4);
-    else offsets = searchForOffsets(fp);
+    offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
+    // Add in overrides if provided
+    if (sampleAddr) {
+        offsets.sampleAddr = sampleAddr & 0x1ffffff;
+        uint32_t tmp = 0;
+        fseek(fp, offsets.sampleAddr, SEEK_SET);
+        fread(&tmp, 4, 1, fp);
+        for (offsets.sampleCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.sampleCount++) fread(&tmp, 4, 1, fp);
+        rewind(fp);
+    }
+    if (instrumentAddr) {
+        offsets.instrumentAddr = instrumentAddr & 0x1ffffff;
+        uint32_t tmp = 0;
+        fseek(fp, offsets.instrumentAddr, SEEK_SET);
+        fread(&tmp, 4, 1, fp);
+        for (offsets.instrumentCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.instrumentCount++) fread(&tmp, 4, 1, fp);
+        rewind(fp);
+    }
+    for (uint32_t a : additionalModules) offsets.modules.push_back(a);
+    offsets.success = offsets.sampleAddr && !offsets.modules.empty();
     // If we don't have all of the required offsets, we can't continue
     if (!offsets.success) {
         fprintf(stderr, "Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
@@ -805,17 +1089,29 @@ int main(int argc, const char * argv[]) {
         fread(&tmp, 4, 1, fp);
         sampleOffsets.push_back(tmp & 0x1ffffff);
     }
-    fseek(fp, offsets.instrumentAddr, SEEK_SET);
-    for (int i = 0; i < offsets.instrumentCount; i++) {
-        fread(&tmp, 4, 1, fp);
-        instrumentOffsets.push_back(tmp & 0x1ffffff);
+    if (offsets.instrumentAddr) {
+        fseek(fp, offsets.instrumentAddr, SEEK_SET);
+        for (int i = 0; i < offsets.instrumentCount; i++) {
+            fread(&tmp, 4, 1, fp);
+            instrumentOffsets.push_back(tmp & 0x1ffffff);
+        }
+    }
+    // Export all WAV samples (if desired)
+    if (exportSamples) {
+        for (int i = 0; i < sampleOffsets.size(); i++) {
+            std::string name = outputDir + "Sample" + std::to_string(i) + ".wav";
+            unkrawerter_readSampleToWAV(fp, sampleOffsets[i], name.c_str());
+            printf("Wrote sample %d to %s\n", i, name.c_str());
+        }
     }
     // Write out all of the new modules
     for (int i = 0; i < offsets.modules.size(); i++) {
-        std::string name = (argc > 2 ? std::string(argv[2]) + "/" : std::string()) + "Module" + std::to_string(i) + ".xm";
-        int r = writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str());
+        std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + ".xm";
+        int r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments);
         if (r) {fclose(fp); return r;}
     }
     fclose(fp);
     return 0;
 }
+
+#endif // AS_LIBRARY
