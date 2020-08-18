@@ -6,57 +6,72 @@ The latest version can be downloaded precompiled on the Releases tab, or you can
 * GCC/Clang: `g++ -std=c++11 -o UnkrawerterGBA unkrawerter.cpp`  
 * Microsoft Visual C++: `cl /EHsc /FeUnkrawerterGBA.exe unkrawerter.cpp`
 
+To use UnkrawerterGBA as a library, make sure to add a macro named `AS_LIBRARY` when compiling (for GCC, add `-DAS_LIBRARY` to the command line).
+
 ## Usage
-Jut run the program from the command line with the path to the ROM as the first argument. You can also specify a second argument for the output directory (defaults to the current one), a third argument for the address count threshold (defaults to 4), and a fourth argument for verbose mode. It will output one XM module file per song in the form `Module<n>.xm` in the output directory.
+In its most basic form, you can run UnkrawerterGBA with just the ROM path, and it will output the module files in the current directory. You can also add the following options to the command line:
+```
+  -i <address>      Override instrument list address
+  -l <file.txt>     Read module names from a file (one name/line, same format as -n)
+  -m <address>      Add an extra module address to the list
+  -n <addr>=<name>  Assign a name to a module address (max. 20 characters)
+  -o <directory>    Output directory
+  -s <address>      Override sample list address
+  -t <threshold>    Search threshold, lower = slower but finds smaller modules,
+                      higher = faster but misses smaller modules (defaults to 4)
+  -a                Do not trim extra instruments; this will make modules much larger in size!
+  -e                Export samples to WAV files
+  -v                Enable verbose mode
+```
 
 ### Threshold argument
-UnkrawallGBA searches for audio files by looking through the ROM for lists of pointers to structures with the audio data. These lists can either be the master instrument list, the master sample list, or a module's list of patterns. By default, UnkrawallGBA ignores any lists with less than four addresses. This is to avoid detecting single variables that are unrelated to Krawall, speeding up detection time. But some songs may have less than four patterns, and so they won't be detected with the default threshold. You can adjust this number to detect modules with fewer patterns, but it may take longer for it to filter out all of the addresses that are not related to Krawall.
+UnkrawerterGBA searches for Krawall data by looking through the ROM for lists of pointers to structures with the Krawall data. These lists can either be the master instrument list, the master sample list, or a module's list of patterns. By default, UnkrawerterGBA ignores any lists with less than four addresses. This is to avoid detecting single variables that are unrelated to Krawall, speeding up detection time. But some songs may have less than four patterns, and so they won't be detected with the default threshold. You can adjust this number to detect modules with fewer patterns, but it may take longer for it to filter out all of the addresses that are not related to Krawall.
 
 ### Verbose mode
-Enable verbose mode to show all of the detected addresses and their types. This can be useful if UnkrawallGBA isn't detecting one of the required lists properly.
+Enable verbose mode to show all of the detected addresses and their types. This can be useful if UnkrawerterGBA isn't detecting one of the required lists properly.
 
-## Legacy tools
-These were the original three tools used before they were combined into one program. They remain here for legacy purposes and debugging.
+## Library API
+UnkrawerterGBA also supports usage as a library for embedding in another program. These functions can be used to rip Krawall music from ROMs in another program.
 
-### `find_krawall_offsets`
-This tool automatically detects the necessary offsets for UnkrawerterGBA in a ROM file. This should work pretty well, but I can't guarantee the effectiveness of it yet. (It's been able to successfully find all of the offsets in my ROM.)
+### `struct OffsetSearchResult`
+Structure to hold results from unkrawerter_searchForOffsets.
+* `success`: Whether all required offsets were found
+* `instrumentAddr`: Address of instrument list
+* `instrumentCount`: Number of instruments in list
+* `sampleAddr`: Address of sample list
+* `sampleCount`: Number of samples in list
+* `modules`: List of module addresses
 
-#### Compiling
-`$ gcc -o find_krawall_offsets find_krawall_offsets.cpp`
+### `void unkrawerter_setVersion(uint32_t version)`
+Sets the Krawall version to convert from. This MUST be used for ROMs using versions older than 2004-07-07.
+* `version`: The Krawall version to set. Should be in the format 0xYYYYMMDD.
 
-#### Usage
-`find_krawall_offsets` expects at least one argument with the path to the ROM file to search through. You can also give it an optional second argument that specifies the minimum number of consecutive addresses in a list that are required to detect it. This is set to 4 by default, but you'll need to set it lower for any modules with less than 4 patterns (my ROM had one of those). You can also give it a third argument which can be anything, and whose presence will tell the program to show all detected offsets with their type. This can be useful if you're having trouble finding all of the offsets and want to see what addresses were detected with what type.
+### `OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, bool verbose = false)`
+Searches a ROM file for offsets and returns the results in a structure.
+* `fp`: The file to read from.
+* `threshold`: The search threshold (as described above). Defaults to 4.
+* `verbose`: Whether to print all addresses found. Defaults to false.
+* Returns: An `OffsetSearchResult` structure with the results.
 
-### `extract_krawall_data`
-This tool extracts data of various types from the specified offsets in a ROM into separate files. This prepares the data to be converted into a suitable format.
+### `void unkrawerter_readSampleToWAV(FILE* fp, uint32_t offset, const char * filename)`
+Reads a sample at an offset from a ROM file to a WAV file.
+* `fp`: The file to read from.
+* `offset`: The offset of the sample to read.
+* `filename`: The path to the WAV file to write to.
 
-#### Compilation
-`$ gcc -o extract_krawall_data extract_krawall_data.c`
-
-#### Usage
-`extract_krawall_data` expects the first argument to be the path to the ROM file to read from. After that, each argument is an offset in hexadecimal with a letter prefix specifying what kind of data to extract. Here is the current list of prefixes:
-* `m`: Reads a module structure and its associated patterns.
-* `l`: Reads samples from a list of sample addresses.
-* `i`: Reads instruments from a list of instrument addresses.
-* `s`: Reads multiple samples starting at the specified address. This is not guaranteed to work and may be removed in the future.
-
-The resulting files will be output in the current directory in the form `<type><number>.bin` (except for patterns, which are in the form `Module<modnum>Pattern<num>.bin`). In addition, patterns will have an accompanying CSV file output with the decoded contents of the pattern; and samples will have an accompanying WAV file with the playable audio data for that sample.
-
-For example, running `extract_krawall_data game.gba m12ab56 l15e69c` will extract the module located in `game.gba` at offset 0x12ab56, the patterns that are used by the module, and the samples in the list located at offset 0x15e69c.
-
-### `create_xm_from_krawall`
-This tool converts the extracted data from `extract_krawall_data` into an XM module file that can by played by a tracker program that supports XM modules, such as OpenMPT.
-
-#### Compiling
-`$ g++ -o create_xm_from_krawall create_xm_from_krawall.cpp`
-
-#### Usage
-`create_xm_from_krawall` expects two initial arguments: the path to the previously extracted module binary, and the output XM file. After that, it expects paths to either pattern files, sample files, or instrument files. The `-p`, `-s`, and `-i` flags will tell it that the following files are patterns, samples, or instruments, respectively, until the next flag is specified or there are no more arguments. You must specify one of these flags after the output argument. There must be at least one of each type, and if you don't specify all of the files needed the program will crash.
-
-For example, running `create_xm_from_krawall Module00.bin Module00.xm -p Module00Pattern*.bin -s Sample*.bin -i Instrument*.bin` will create a new XM module `Module00.xm` from the module binary `Module00.bin`, using all of the previously extracted patterns, samples, and instruments.
+### `int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL)`
+Writes a single XM module at an offset from a ROM file, using the specified samples and instruments.
+* `fp`: The file to read from.
+* `moduleOffset`: The address of the module to read.
+* `sampleOffsets`: A list of sample addresses.
+* `instrumentOffsets`: A list of instrument addresses.
+* `filename`: The path to the XM file to write to.
+* `trimInstruments`: Whether to remove instruments that are not used by the module. Defaults to true.
+* `name`: The name of the module; if unset then the module is named "Krawall conversion". Defaults to `NULL`.
+* Returns: 0 on success, non-zero on error.
 
 ### Finding Krawall data structures in ROMs manually
-If you desire to find the offsets on your own (such as if the automatic finder isn't working properly), you can search through the ROM for the offsets manually. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files.
+If you desire to find the offsets on your own (such as if the automatic finder isn't working properly), you can search through the ROM for the offsets manually. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files. In most cases this is unnecessary, since the automatic detector is pretty good at finding the offsets itself.
 
 #### Modules
 Modules are probably the easiest structure to locate in a ROM. Search for a block of at least 256 bytes of 0's. Just before this block, check for a chunk of bytes that are ascending from 0. Before that, look for a byte that will likely be 8, as well as another byte that should tell you the number of bytes in that ascending chunk. At the end of the block of 0's, the first byte will likely be 0x80 (but don't rely on it). The next byte should be below 10, and the byte after that should be a reasonable BPM (probably 60 <= n <= 180). The next 6 bytes should be either 1 or 0, with the last byte definitely being 0. Lastly, there will be a list of 4-byte addresses in the decoded form `0x08xxxxxx`, or `xx xx xx 08` in the hex editor.
