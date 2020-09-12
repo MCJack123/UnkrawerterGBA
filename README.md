@@ -22,6 +22,7 @@ In its most basic form, you can run UnkrawerterGBA with just the ROM path, and i
   -a                Do not trim extra instruments; this will make modules much larger in size!
   -e                Export samples to WAV files
   -v                Enable verbose mode
+  -x                Disable compatibility fixes, makes patterns more accurate but worsens playback
 ```
 
 ### Threshold argument
@@ -59,7 +60,7 @@ Reads a sample at an offset from a ROM file to a WAV file.
 * `offset`: The offset of the sample to read.
 * `filename`: The path to the WAV file to write to.
 
-### `int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL)`
+### `int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true)`
 Writes a single XM module at an offset from a ROM file, using the specified samples and instruments.
 * `fp`: The file to read from.
 * `moduleOffset`: The address of the module to read.
@@ -68,6 +69,7 @@ Writes a single XM module at an offset from a ROM file, using the specified samp
 * `filename`: The path to the XM file to write to.
 * `trimInstruments`: Whether to remove instruments that are not used by the module. Defaults to true.
 * `name`: The name of the module; if unset then the module is named "Krawall conversion". Defaults to `NULL`.
+* `fixCompatibility`: Whether to attempt to fix some effects that behave differently in Krawall. This will modify the extracted patterns and reduces extraction accuracy, but improves playback accuracy. Defaults to true.
 * Returns: 0 on success, non-zero on error.
 
 ### Finding Krawall data structures in ROMs manually
