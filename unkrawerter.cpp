@@ -1,6 +1,6 @@
 /*
  * UnkrawerterGBA
- * Version 2.0
+ * Version 2.1
  * 
  * This program automatically extracts music files from Gameboy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM module
@@ -315,11 +315,12 @@ extern "C" {
 }
 
 // Read a pattern from a file pointer to a Pattern structure pointer
-static Pattern * readPatternFile(FILE* fp, uint32_t offset) {
+static Pattern * readPatternFile(FILE* fp, uint32_t offset, bool use2003format) {
     fseek(fp, offset + 32, SEEK_SET);
     std::vector<uint8_t> fileContents;
     unsigned short rows = 0;
-    fread(&rows, 2, 1, fp);
+    if (use2003format) rows = fgetc(fp);
+    else fread(&rows, 2, 1, fp);
     // We don't need to do full decoding; decode just enough to understand the size of the pattern
     for (int row = 0; row < rows; row++) {
         for (;;) {
@@ -330,7 +331,7 @@ static Pattern * readPatternFile(FILE* fp, uint32_t offset) {
                 unsigned char note = fgetc(fp);
                 fileContents.push_back(note);
                 fileContents.push_back(fgetc(fp));
-                if (note & 0x80) fileContents.push_back(fgetc(fp));
+                if (!use2003format && (note & 0x80)) fileContents.push_back(fgetc(fp));
             }
             if (follow & 0x40) {
                 fileContents.push_back(fgetc(fp));
@@ -346,40 +347,6 @@ static Pattern * readPatternFile(FILE* fp, uint32_t offset) {
     retval->length = fileContents.size();
     fread(retval->index, 2, 16, fp);
     fseek(fp, 2, SEEK_CUR);
-    retval->rows = rows;
-    memcpy(retval->data, &fileContents[0], fileContents.size());
-    return retval;
-}
-
-static Pattern * readPattern2003File(FILE* fp, uint32_t offset) {
-    fseek(fp, offset + 32, SEEK_SET);
-    std::vector<uint8_t> fileContents;
-    unsigned short rows = fgetc(fp);
-    // We don't need to do full decoding; decode just enough to understand the size of the pattern
-    for (int row = 0; row < rows; row++) {
-        for (;;) {
-            unsigned char follow = fgetc(fp);
-            fileContents.push_back(follow);
-            if (!follow) break;
-            if (follow & 0x20) {
-                unsigned char note = fgetc(fp);
-                fileContents.push_back(note);
-                fileContents.push_back(fgetc(fp));
-                //if (note & 0x80) fileContents.push_back(fgetc(fp));
-            }
-            if (follow & 0x40) {
-                fileContents.push_back(fgetc(fp));
-            }
-            if (follow & 0x80) {
-                fileContents.push_back(fgetc(fp));
-                fileContents.push_back(fgetc(fp));
-            }
-        }
-    }
-    fseek(fp, offset, SEEK_SET);
-    Pattern * retval = (Pattern*)malloc(36 + fileContents.size());
-    retval->length = fileContents.size();
-    fread(retval->index, 2, 16, fp);
     retval->rows = rows;
     memcpy(retval->data, &fileContents[0], fileContents.size());
     return retval;
@@ -406,10 +373,8 @@ static Module * readModuleFile(FILE* fp, uint32_t offset) {
     for (int i = 0; i <= maxPattern; i++) {
         fseek(fp, offset + 364 + i*4, SEEK_SET);
         fread(&addr, 4, 1, fp);
-        if (!(addr & 0x08000000) || (addr & 0xf6000000))
-            break;
-        if (version < 0x20040707) retval2->patterns[i] = readPattern2003File(fp, addr & 0x1ffffff);
-        else retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff);
+        if (!(addr & 0x08000000) || (addr & 0xf6000000)) break;
+        retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff, version < 0x20040707);
     }
     return retval2;
 }
@@ -453,7 +418,7 @@ inline void fputcn(int c, int num, FILE* fp) {for (; num > 0; num--) fputc(c, fp
 // Some effects must be converted from S3M syntax to XM syntax.
 // Some effects are only supported in S3M files, and are not converted.
 // Some effects are only supported in MPT/OpenMPT, and may not play properly on other trackers.
-const std::pair<unsigned short, unsigned char> effectMap[] = {
+const std::pair<unsigned short, unsigned char> effectMap_xm[] = {
     {0xFFFF, 0xFF}, 
     {0x0F00, 0xFF},       // EFF_SPEED
     {0x0F00, 0xFF},       // EFF_BPM
@@ -483,7 +448,7 @@ const std::pair<unsigned short, unsigned char> effectMap[] = {
     {0xFFFF, 0xFF},       // EFF_CHANNEL_VOLSLIDE           (S3M!)
     {0x0900, 0xFF},       // EFF_OFFSET
     {0x1900, 0xFF},       // EFF_PANSLIDE
-    {0x0E90, 0x0F},       // EFF_RETRIG
+    {0x1B00, 0xFF},       // EFF_RETRIG
     {0x0700, 0xFF},       // EFF_TREMOLO					30
     {0xFFFF, 0xFF},       // EFF_FVIBRATO                   (S3M!)
     {0x1000, 0xFF},       // EFF_GLOBAL_VOL
@@ -496,20 +461,28 @@ const std::pair<unsigned short, unsigned char> effectMap[] = {
     {0x0E70, 0x0F},       // EFF_WAVE_TREMOLO
     {0x2150, 0x0F},       // EFF_WAVE_PANBRELLO				40 (MPT!)
     {0x2160, 0x0F},       // EFF_PATTERN_DELAYF			    (!)
-    {0x0800, 0xFF},       // EFF_OLD_PAN					(!) converted to EFF_PAN
+    {0x0E80, 0x0F},       // EFF_OLD_PAN					(!) converted to EFF_PAN
     {0x0E60, 0x0F},       // EFF_PATTERN_LOOP
     {0x0EC0, 0x0F},       // EFF_NOTE_CUT
     {0x0ED0, 0x0F},       // EFF_NOTE_DELAY					45
     {0x0EE0, 0x0F},       // EFF_PATTERN_DELAY			    (*)
     {0x1300, 0xFF},       // EFF_ENV_SETPOS
-    {0x0900, 0xFF},       // EFF_OFFSET_HIGH
+    {0xFFFF, 0xFF},       // EFF_OFFSET_HIGH
     {0x0600, 0xFF},       // EFF_VOLSLIDE_VIBRATO_XM
     {0x0500, 0xFF}        // EFF_VOLSLIDE_PORTA_XM			50
 };
 
+// Structure to hold a few per-channel memory things
+struct channel_memory {
+    unsigned char s3m;
+    unsigned char pan;
+    int porta;
+    unsigned short instrument;
+};
+
 // Writes a module from a file pointer to a new XM file.
 // XM file format from http://web.archive.org/web/20060809013752/http://pipin.tmd.ns.ac.yu/extra/fileformat/modules/xm/xm.txt
-int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL) {
+int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true) {
     // Die if there are too many instruments for XM & we're not trimming instruments
     if (instrumentOffsets.size() > 255 && !trimInstruments) {
         fprintf(stderr, "Error: This ROM cannot be ripped without trimming instruments.\n");
@@ -558,6 +531,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
     fputc(0, out); // 2-byte padding
     fwrite(mod->order, 1, 256, out);
     std::vector<unsigned short> instrumentList; // used to hold the instruments used so we can remove unnecessary instruments
+    std::map<unsigned short, std::vector<std::pair<unsigned char, unsigned long> > > sampleOffsetList; // used to hold on to sample offset effects that may need fixing
     // Write each pattern
     for (int i = 0; i < patternCount; i++) {
         // Write pattern header
@@ -570,7 +544,14 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
         const unsigned char * data = mod->patterns[i]->data;
         Note * thisrow = (Note*)calloc(mod->channels, sizeof(Note)); // stores the current row's notes
         unsigned char warnings = 0; // for S3M/MPT warnings, we only warn once per pattern
-        unsigned char * s3memory = new unsigned char[mod->channels]; // for channel memory for S3M-specific commands
+        struct channel_memory * memory = new struct channel_memory[mod->channels]; // to store memory for various patches
+        for (int i = 0; i < mod->channels; i++) {
+            memory[i].s3m = 0;
+            memory[i].porta = 0;
+            memory[i].pan = 0x80;
+            memory[i].instrument = 0;
+        }
+        unsigned char speed = mod->initSpeed; // to help portamento
         for (int row = 0; row < mod->patterns[i]->rows; row++) {
             memset(thisrow, 0, sizeof(Note) * mod->channels); // Zero so we can check the values for 0 later
             for (;;) {
@@ -603,27 +584,27 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                     effect = *data++;
                     effectop = *data++;
                     // Convert the Krawall effect into an XM effect
-                    unsigned short xmeffect = effectMap[effect].first;
-                    unsigned char effectmask = effectMap[effect].second;
+                    unsigned short xmeffect = effectMap_xm[effect].first;
+                    unsigned char effectmask = effectMap_xm[effect].second;
                     if (xmeffect == 0xFFFF) { // Ignored
                         xmflag &= ~0x18;
                         effect = 0;
                         effectop = 0;
                     } else if (effect == 6) { // S3M volume slide
-                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
-                        s3memory[channel] = effectop;
+                        if (effectop == 0 && memory[channel].s3m) effectop = memory[channel].s3m;
+                        memory[channel].s3m = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine decrease
                             effect = 0x0E;
                             effectop = 0xB0 | (effectop & 0x0F);
-                        } else if ((effectop & 0x0F) == 0x0F) { // fine increase
+                        } else if ((effectop & 0x0F) == 0x0F && effectop != 0x0F) { // fine increase (note: 0x0F means normal slide)
                             effect = 0x0E;
                             effectop = 0xA0 | (effectop >> 4);
                         } else { // normal volume slide
                             effect = 0x0A;
                         }
                     } else if (effect == 11) { // S3M porta down
-                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
-                        s3memory[channel] = effectop;
+                        if (effectop == 0 && memory[channel].s3m) effectop = memory[channel].s3m;
+                        memory[channel].s3m = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine
                             effect = 0x0E;
                             effectop = 0x20 | (effectop & 0x0F);
@@ -634,8 +615,8 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                             effect = 0x02;
                         }
                     } else if (effect == 15) { // S3M porta up
-                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
-                        s3memory[channel] = effectop;
+                        if (effectop == 0 && memory[channel].s3m) effectop = memory[channel].s3m;
+                        memory[channel].s3m = effectop;
                         if ((effectop & 0xF0) == 0xF0) { // fine
                             effect = 0x0E;
                             effectop = 0x10 | (effectop & 0x0F);
@@ -646,9 +627,9 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                             effect = 0x01;
                         }
                     } else if (effect == 23) { // S3M volume slide + vibrato
-                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
-                        s3memory[channel] = effectop;
-                        // XM doesn't have a Vol+Vib command, so put the volume slide command in the volume column & vibrato in the effects column
+                        if (effectop == 0 && memory[channel].s3m) effectop = memory[channel].s3m;
+                        memory[channel].s3m = effectop;
+                        // XM doesn't have a fine Vol+Vib command, so put the volume slide command in the volume column & vibrato in the effects column
                         if ((effectop & 0xF0) == 0xF0) { // fine decrease
                             if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x80 | (effectop & 0x0F);}
                             effect = 0x04;
@@ -657,13 +638,13 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                             if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x90 | (effectop >> 4);}
                             effect = 0x04;
                             effectop = 0;
-                        } else { // normal volume slide
+                        } else { // normal volume slide + vibrato
                             effect = 0x06;
                         }
                     } else if (effect == 24) { // S3M volume slide + porta
-                        if (effectop == 0 && s3memory) effectop = s3memory[channel];
-                        s3memory[channel] = effectop;
-                        // XM doesn't have a Vol+Porta command, so put the volume slide command in the volume column & portamento in the effects column
+                        if (effectop == 0 && memory[channel].s3m) effectop = memory[channel].s3m;
+                        memory[channel].s3m = effectop;
+                        // XM doesn't have a fine Vol+Porta command, so put the volume slide command in the volume column & portamento in the effects column
                         if ((effectop & 0xF0) == 0xF0) { // fine decrease
                             if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x80 | (effectop & 0x0F);}
                             effect = 0x03;
@@ -672,17 +653,26 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                             if (!(xmflag & 0x04)) {xmflag |= 0x04; volume = 0x90 | (effectop >> 4);}
                             effect = 0x03;
                             effectop = 0;
-                        } else { // normal volume slide
+                        } else { // normal volume slide + portamento
                             effect = 0x06;
                         }
-                    } else if (effect == 25 || effect == 26 || effect == 31) { // Unsupported S3M effects
-                        if (!(warnings & 0x02)) {warnings |= 0x02; printf("Warning: Pattern %d uses an S3M effect that isn't compatible with XM. It will not play correctly.\n", i);}
+                    } /*else if (effect == 45 && effectop == 0) {
+                        // Note delay of 0 = no note
+                        xmflag = 0x80;
+                        note = 0;
+                        instrument = 0;
+                        volume = 0;
+                        effect = 0;
+                    }*/ else if (effect == 25 || effect == 26 || effect == 31 || (effect == 1 && (effectop >= 0x20 || effectop == 0))) { // Unsupported S3M effects
+                        if (!(warnings & 0x02) && !(effect == 1 && effectop == 0)) {warnings |= 0x02; printf("Warning: Pattern %d uses an S3M effect that isn't compatible with XM. It will not play correctly.\n", i);}
                         xmflag &= ~0x18;
                         effect = 0;
                         effectop = 0;
                     } else { // Other effects
                         // Warn if MPT-only
                         if ((effect == 35 || effect == 40) && !(warnings & 0x01)) {warnings |= 0x01; printf("Warning: Pattern %d uses an effect specific to OpenMPT. It may not play correctly in other trackers.\n", i);}
+                        if (effect == 1 || effect == 3) speed = effectop;
+                        if (effect == 29 && (effectop & 0xF0) == 0x00) effectop |= 0x80;
                         xmeffect = xmeffect | (effectop & effectmask);
                         effect = xmeffect >> 8;
                         effectop = xmeffect & 0xFF;
@@ -690,6 +680,76 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                 }
                 // If the channel is OOB then don't store it (prevents segfaults, but that shouldn't happen if the file's good)
                 if (channel >= mod->channels) continue;
+                if (fixCompatibility) {
+                    // Krawall cuts off portamento below 0, while XM underflows below 0 and never stops, so we need to fix that
+                    // To do that we need to keep track of the portamento value
+                    // Since I kinda don't want to write an entire tracker system just for one effect, we're just keeping track of the main porta effects
+                    if (!mod->flagAmigaLimits) {
+                        if (note && note < 97) memory[channel].porta = note * 16; // If there's a new note, reset the porta
+                        // Look for the new porta value according to the porta value
+                        int d = 0;
+                        if (effect == 0x02)
+                            d = memory[channel].porta - effectop * speed;
+                        else if (effect == 0x0E && (effectop & 0xF0) == 0x20)
+                            d = memory[channel].porta - (effectop & 0x0F);
+                        else if (effect == 0x21 && (effectop & 0xF0) == 0x20)
+                            d = memory[channel].porta - ((effectop & 0x0F) >> 2);
+                        else if (effect == 0x01)
+                            d = memory[channel].porta + effectop * speed;
+                        else if (effect == 0x0E && (effectop & 0xF0) == 0x10)
+                            d = memory[channel].porta + (effectop & 0x0F);
+                        else if (effect == 0x21 && (effectop & 0x0F) == 0x10)
+                            d = memory[channel].porta + ((effectop & 0x0F) >> 2);
+                        else d = 0xFFFF;
+                        // If the new porta is below 0, cut off the note
+                        if (d <= 0) {
+                            if (memory[channel].porta > 0) {
+                                // There's still a bit of porta left until 0, so handle that here
+                                if (effect == 0x02)
+                                    effectop = (effectop * speed - memory[channel].porta) / speed;
+                                else if (effect == 0x0E && (effectop & 0xF0) == 0x20)
+                                    effectop = (effectop & 0x0F) - memory[channel].porta;
+                                else if (effect == 0x21 && (effectop & 0xF0) == 0x20)
+                                    effectop = (((effectop & 0x0F) >> 2) - memory[channel].porta) << 2;
+                            } else {
+                                // Otherwise just queue a cutoff note and remove the effect
+                                note = 97;
+                                xmflag &= ~0x18;
+                                xmflag |= 0x01;
+                                effect = 0;
+                                effectop = 0;
+                            }
+                        }
+                        // Set the new porta value in the memory
+                        // Skip if we're already below 0 to avoid accidental underflow
+                        if (memory[channel].porta > 0 && d != 0xFFFF) memory[channel].porta = d;
+                    }
+                    // If we're not using instruments then make sure the panning doesn't get messed up
+                    if (!mod->flagInstrumentBased) {
+                        if (memory[channel].pan != 0x80 && !(effect == 0x08 || (effect == 0x0E && (effectop & 0xF0) == 0x80))) {
+                            if ((xmflag & 0x1A) == 0x02) {
+                                // Best result, no effect is set so we can squeeze in a pan effect here
+                                xmflag |= 0x18;
+                                effect = 0x08;
+                                effectop = memory[channel].pan;
+                            } else if (instrument && instrument == memory[channel].instrument) {
+                                // The panning only gets set when the instrument changes, so if the instrument didn't change we can just omit it and keep the last pan
+                                xmflag &= ~0x02;
+                            } else if ((xmflag & 0x06) == 0x02) {
+                                // Effect column is already used, but volume isn't, so use the volume column
+                                // Unfortunately this reduces the resolution to 4 bits, so not as desirable
+                                xmflag |= 0x04;
+                                volume = 0xC0 | (memory[channel].pan >> 4);
+                            } else {
+                                // Otherwise, both volume and effect columns are in use so we can't fix the panning. Oh well.
+                                if (!(warnings & 0x04)) {warnings |= 0x04; printf("Warning: Pattern %d uses special panning effects not available in XM. It will not play correctly.\n", i);}
+                            }
+                        }
+                        if (effect == 0x08) {effectop <<= 1; memory[channel].pan = effectop;}
+                        else if (effect == 0x0E && (effectop & 0xF0) == 0x80) memory[channel].pan = effectop << 4;
+                        if (instrument && note < 97) memory[channel].instrument = instrument;
+                    }
+                }
                 // Store the note data in the row
                 thisrow[channel].xmflag = xmflag;
                 thisrow[channel].note = note;
@@ -719,6 +779,8 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                                 // Instruments are listed as 8-bit numbers, so die if there are too many instruments
                                 if (instrumentList.size() >= 254) {
                                     fprintf(stderr, "Error: Too many instruments in current pattern, cannot continue.\n");
+                                    free(thisrow);
+                                    delete[] memory;
                                     for (int l = 0; l < patternCount; l++) free((void*)mod->patterns[l]);
                                     free(mod);
                                     fclose(out);
@@ -731,13 +793,17 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                         }
                     }
                     if (thisrow[j].xmflag & 0x04) fputc(thisrow[j].volume, out);
-                    if (thisrow[j].xmflag & 0x08) fputc(thisrow[j].effect, out);
+                    if (thisrow[j].xmflag & 0x08) {
+                        if (fixCompatibility && thisrow[j].effect == 0x09 && (thisrow[j].xmflag & 0x10))
+                            sampleOffsetList[thisrow[j].instrument - 1].push_back(std::make_pair(thisrow[j].effectop, ftell(out)));
+                        fputc(thisrow[j].effect, out);
+                    }
                     if (thisrow[j].xmflag & 0x10) fputc(thisrow[j].effectop, out);
                 } else fputc(0x80, out); // Empty note (do nothing this row)
             }
         }
         free(thisrow);
-        delete[] s3memory;
+        delete[] memory;
         // Write the size of the packed pattern data
         uint32_t endPos = ftell(out);
         fseek(out, sizePos, SEEK_SET);
@@ -845,6 +911,17 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                 snprintf(name, 22, "Sample%d", samples[j]);
                 fwrite(name, 1, 22, out);
                 sarr.push_back(s); // Push the read sample back so we don't have to allocate & read it again
+                // Update any offset effects that are too big for the instrument
+                if (fixCompatibility && sampleOffsetList.find(i) != sampleOffsetList.end()) {
+                    unsigned long retpos = ftell(out);
+                    for (std::pair<unsigned char, unsigned long> eff : sampleOffsetList[i]) {
+                        if (eff.first >= (s->size >> 8)) {
+                            fseek(out, eff.second, SEEK_SET);
+                            fputcn(0, 2, out);
+                        }
+                    }
+                    fseek(out, retpos, SEEK_SET);
+                }
             }
             // Write the actual sample data
             for (int j = 0; j < sarr.size(); j++) {
@@ -895,6 +972,17 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
             memset(name, ' ', 22);
             snprintf(name, 22, "Sample%d", i);
             fwrite(name, 1, 22, out);
+            // Update any offset effects that are too big for the instrument
+            if (fixCompatibility && sampleOffsetList.find(i) != sampleOffsetList.end()) {
+                unsigned long retpos = ftell(out);
+                for (std::pair<unsigned char, unsigned long> eff : sampleOffsetList[i]) {
+                    if ((unsigned short)eff.first << 8 > s->size) {
+                        fseek(out, eff.second, SEEK_SET);
+                        fputcn(0, 2, out);
+                    }
+                }
+                fseek(out, retpos, SEEK_SET);
+            }
             // Everything's written as deltas instead of absolute values
             // We also convert from signed to unsigned here since it has to be unsigned
             unsigned char old = 0;
@@ -943,6 +1031,7 @@ int main(int argc, const char * argv[]) {
                         "  -a                Do not trim extra instruments; this will make modules much larger in size!\n"
                         "  -e                Export samples to WAV files\n"
                         "  -v                Enable verbose mode\n"
+                        "  -x                Disable compatibility fixes, makes patterns more accurate but worsens playback\n"
                         "  -h                Show this help\n", argv[0]);
         return 1;
     }
@@ -952,6 +1041,7 @@ int main(int argc, const char * argv[]) {
     bool verbose = false;
     bool trimInstruments = true;
     bool exportSamples = false;
+    bool fixCompatibility = true;
     std::string romPath;
     uint32_t sampleAddr = 0, instrumentAddr = 0;
     std::vector<uint32_t> additionalModules;
@@ -1002,6 +1092,7 @@ int main(int argc, const char * argv[]) {
                         }
                     }
                     fclose(fp);
+                    break;
                 }
             }
             nextArg = 0;
@@ -1011,6 +1102,7 @@ int main(int argc, const char * argv[]) {
                     case 'a': trimInstruments = false; break;
                     case 'e': exportSamples = true; break;
                     case 'i': nextArg = 1; break;
+                    case 'k': version = 20030101; break;
                     case 'l': nextArg = 7; break;
                     case 'm': nextArg = 2; break;
                     case 'n': nextArg = 6; break;
@@ -1018,6 +1110,7 @@ int main(int argc, const char * argv[]) {
                     case 's': nextArg = 4; break;
                     case 't': nextArg = 5; break;
                     case 'v': verbose = true; break;
+                    case 'x': fixCompatibility = false; break;
                 }
             }
         } else if (romPath.empty()) romPath = argv[i];
@@ -1107,7 +1200,7 @@ int main(int argc, const char * argv[]) {
     // Write out all of the new modules
     for (int i = 0; i < offsets.modules.size(); i++) {
         std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + ".xm";
-        int r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments);
+        int r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL), fixCompatibility);
         if (r) {fclose(fp); return r;}
     }
     fclose(fp);
