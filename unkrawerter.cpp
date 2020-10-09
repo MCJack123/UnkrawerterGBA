@@ -1,10 +1,10 @@
 /*
  * UnkrawerterGBA
- * Version 2.1
+ * Version 3.0
  * 
  * This program automatically extracts music files from Gameboy Advance games
- * that use the Krawall sound engine. Audio files are extracted in the XM module
- * format, which can be opened by programs such as OpenMPT.
+ * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
+ * module format, which can be opened by programs such as OpenMPT.
  * 
  * Copyright (c) 2020 JackMacWindows.
  *
@@ -276,7 +276,8 @@ extern "C" {
     } Instrument;
 
     typedef struct PACKED {
-        unsigned short  length;
+        unsigned short  length;    // custom
+        unsigned short  s3mlength; // custom
         unsigned short 	index[ 16 ];
         unsigned short	rows;
         unsigned char 	data[1];
@@ -319,31 +320,37 @@ static Pattern * readPatternFile(FILE* fp, uint32_t offset, bool use2003format) 
     fseek(fp, offset + 32, SEEK_SET);
     std::vector<uint8_t> fileContents;
     unsigned short rows = 0;
+    unsigned short s3mlength = 0;
     if (use2003format) rows = fgetc(fp);
     else fread(&rows, 2, 1, fp);
     // We don't need to do full decoding; decode just enough to understand the size of the pattern
     for (int row = 0; row < rows; row++) {
         for (;;) {
             unsigned char follow = fgetc(fp);
+            s3mlength++;
             fileContents.push_back(follow);
             if (!follow) break;
             if (follow & 0x20) {
                 unsigned char note = fgetc(fp);
                 fileContents.push_back(note);
                 fileContents.push_back(fgetc(fp));
+                s3mlength += 2;
                 if (!use2003format && (note & 0x80)) fileContents.push_back(fgetc(fp));
             }
             if (follow & 0x40) {
                 fileContents.push_back(fgetc(fp));
+                s3mlength++;
             }
             if (follow & 0x80) {
                 fileContents.push_back(fgetc(fp));
                 fileContents.push_back(fgetc(fp));
+                s3mlength += 2;
             }
         }
     }
     fseek(fp, offset, SEEK_SET);
-    Pattern * retval = (Pattern*)malloc(36 + fileContents.size());
+    Pattern * retval = (Pattern*)malloc(38 + fileContents.size());
+    retval->s3mlength = s3mlength;
     retval->length = fileContents.size();
     fread(retval->index, 2, 16, fp);
     fseek(fp, 2, SEEK_CUR);
@@ -454,7 +461,7 @@ const std::pair<unsigned short, unsigned char> effectMap_xm[] = {
     {0x1000, 0xFF},       // EFF_GLOBAL_VOL
     {0x1100, 0xFF},       // EFF_GLOBAL_VOLSLIDE
     {0x0800, 0xFF},       // EFF_PAN
-    {0x2300, 0xFF},       // EFF_PANBRELLO					35 (MPT!)
+    {0x2200, 0xFF},       // EFF_PANBRELLO					35 (MPT!)
     {0xFFFF, 0xFF},       // EFF_MARK
     {0x0E30, 0x0F},       // EFF_GLISSANDO
     {0x0E40, 0x0F},       // EFF_WAVE_VIBR
@@ -466,10 +473,65 @@ const std::pair<unsigned short, unsigned char> effectMap_xm[] = {
     {0x0EC0, 0x0F},       // EFF_NOTE_CUT
     {0x0ED0, 0x0F},       // EFF_NOTE_DELAY					45
     {0x0EE0, 0x0F},       // EFF_PATTERN_DELAY			    (*)
-    {0x1300, 0xFF},       // EFF_ENV_SETPOS
+    {0x1500, 0xFF},       // EFF_ENV_SETPOS
     {0xFFFF, 0xFF},       // EFF_OFFSET_HIGH
     {0x0600, 0xFF},       // EFF_VOLSLIDE_VIBRATO_XM
     {0x0500, 0xFF}        // EFF_VOLSLIDE_PORTA_XM			50
+};
+
+// Same for S3M effects
+const std::pair<unsigned short, unsigned char> effectMap_s3m[] = {
+    {0xFF00, 0x00}, 
+    {0x0100, 0xFF},       //  A: EFF_SPEED
+    {0x1400, 0xFF},       //  T: EFF_BPM
+    {0xFF00, 0xFF},       //  -: EFF_SPEEDBPM
+    {0x0200, 0xFF},       //  B: EFF_PATTERN_JUMP
+    {0x0300, 0xFF},       //  C: EFF_PATTERN_BREAK				5
+    {0x0400, 0xFF},       //  D: EFF_VOLSLIDE_S3M               
+    {0x0400, 0xFF},       //  D: EFF_VOLSLIDE_XM
+    {0x04F0, 0x0F},       //  D: EFF_VOLSLIDE_DOWN_XM_FINE
+    {0x040F, 0xF0},       //  D: EFF_VOLSLIDE_UP_XM_FINE
+    {0x0500, 0xFF},       //  E: EFF_PORTA_DOWN_XM				10
+    {0x0500, 0xFF},       //  E: EFF_PORTA_DOWN_S3M             
+    {0x05F0, 0x0F},       //  E: EFF_PORTA_DOWN_XM_FINE
+    {0x05E0, 0x0F},       //  E: EFF_PORTA_DOWN_XM_EFINE
+    {0x0600, 0xFF},       //  F: EFF_PORTA_UP_XM
+    {0x0600, 0xFF},       //  F: EFF_PORTA_UP_S3M				15
+    {0x06F0, 0x0F},       //  F: EFF_PORTA_UP_XM_FINE
+    {0x06E0, 0x0F},       //  F: EFF_PORTA_UP_XM_EFINE
+    {0xFF00, 0x00},       //  -: EFF_VOLUME                     (XM!)
+    {0x0700, 0xFF},       //  G: EFF_PORTA_NOTE
+    {0x0800, 0xFF},       //  H: EFF_VIBRATO					20
+    {0x0900, 0xFF},       //  I: EFF_TREMOR
+    {0x0A00, 0xFF},       //  J: EFF_ARPEGGIO
+    {0x0B00, 0xFF},       //  K: EFF_VOLSLIDE_VIBRATO
+    {0x0C00, 0xFF},       //  L: EFF_VOLSLIDE_PORTA
+    {0x0D00, 0xFF},       //  M: EFF_CHANNEL_VOL				25
+    {0x0E00, 0xFF},       //  N: EFF_CHANNEL_VOLSLIDE           
+    {0x0F00, 0xFF},       //  O: EFF_OFFSET
+    {0x1000, 0xFF},       //  P: EFF_PANSLIDE
+    {0x1100, 0xFF},       //  Q: EFF_RETRIG
+    {0x1200, 0xFF},       //  R: EFF_TREMOLO					30
+    {0x1500, 0xFF},       //  U: EFF_FVIBRATO                   
+    {0x1600, 0xFF},       //  V: EFF_GLOBAL_VOL
+    {0x1700, 0xFF},       //  W: EFF_GLOBAL_VOLSLIDE
+    {0x1800, 0xFF},       //  X: EFF_PAN
+    {0x1900, 0xFF},       //  Y: EFF_PANBRELLO					35 (MPT!)
+    {0xFF00, 0x00},       //  -: EFF_MARK                       (KRW!)
+    {0x1310, 0x0F},       //  S: EFF_GLISSANDO
+    {0x1330, 0x0F},       //  S: EFF_WAVE_VIBR
+    {0x1340, 0x0F},       //  S: EFF_WAVE_TREMOLO
+    {0x1350, 0x0F},       //  S: EFF_WAVE_PANBRELLO				40 (MPT!)
+    {0x1360, 0x0F},       //  S: EFF_PATTERN_DELAYF			    (!)
+    {0x1380, 0x0F},       //  S: EFF_OLD_PAN					(!) converted to EFF_PAN
+    {0x13B0, 0x0F},       //  S: EFF_PATTERN_LOOP
+    {0x13C0, 0x0F},       //  S: EFF_NOTE_CUT
+    {0x13D0, 0x0F},       //  S: EFF_NOTE_DELAY					45
+    {0x13E0, 0x0F},       //  S: EFF_PATTERN_DELAY			    (*)
+    {0xFF00, 0x00},       //  -: EFF_ENV_SETPOS                 (XM!)
+    {0x13A0, 0xFF},       //  S: EFF_OFFSET_HIGH
+    {0x0B00, 0xFF},       //  K: EFF_VOLSLIDE_VIBRATO_XM
+    {0x0C00, 0xFF}        //  L: EFF_VOLSLIDE_PORTA_XM			50
 };
 
 // Structure to hold a few per-channel memory things
@@ -515,7 +577,9 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
         fwrite("\032UnkrawerterGBA      \x04\x01\x14\x01\0\0", 1, 27, out);
     }
     fputc(mod->numOrders, out);
-    fputcn(0, 3, out); // 4-byte padding
+    fputc(0, out); // 1-byte padding
+    fputc(mod->songRestart, out);
+    fputc(0, out); // 1-byte padding
     fputc(mod->channels, out);
     fputc(0, out); // 2-byte padding
     unsigned short pnum = patternCount;
@@ -656,21 +720,14 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                         } else { // normal volume slide + portamento
                             effect = 0x06;
                         }
-                    } /*else if (effect == 45 && effectop == 0) {
-                        // Note delay of 0 = no note
-                        xmflag = 0x80;
-                        note = 0;
-                        instrument = 0;
-                        volume = 0;
-                        effect = 0;
-                    }*/ else if (effect == 25 || effect == 26 || effect == 31 || (effect == 1 && (effectop >= 0x20 || effectop == 0))) { // Unsupported S3M effects
-                        if (!(warnings & 0x02) && !(effect == 1 && effectop == 0)) {warnings |= 0x02; printf("Warning: Pattern %d uses an S3M effect that isn't compatible with XM. It will not play correctly.\n", i);}
+                    } else if (effect == 25 || effect == 26 || effect == 31 || (effect == 1 && (effectop >= 0x20 || effectop == 0))) { // Unsupported S3M effects
+                        if (!(warnings & 0x02) && !(effect == 1 && effectop == 0)) {warnings |= 0x02; fprintf(stderr, "Warning: Pattern %d uses an S3M effect that isn't compatible with XM. It will not play correctly.\n", i);}
                         xmflag &= ~0x18;
                         effect = 0;
                         effectop = 0;
                     } else { // Other effects
                         // Warn if MPT-only
-                        if ((effect == 35 || effect == 40) && !(warnings & 0x01)) {warnings |= 0x01; printf("Warning: Pattern %d uses an effect specific to OpenMPT. It may not play correctly in other trackers.\n", i);}
+                        if ((effect == 35 || effect == 40) && !(warnings & 0x01)) {warnings |= 0x01; fprintf(stderr, "Warning: Pattern %d uses an effect specific to OpenMPT. It may not play correctly in other trackers.\n", i);}
                         if (effect == 1 || effect == 3) speed = effectop;
                         if (effect == 29 && (effectop & 0xF0) == 0x00) effectop |= 0x80;
                         xmeffect = xmeffect | (effectop & effectmask);
@@ -742,7 +799,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                                 volume = 0xC0 | (memory[channel].pan >> 4);
                             } else {
                                 // Otherwise, both volume and effect columns are in use so we can't fix the panning. Oh well.
-                                if (!(warnings & 0x04)) {warnings |= 0x04; printf("Warning: Pattern %d uses special panning effects not available in XM. It will not play correctly.\n", i);}
+                                if (!(warnings & 0x04)) {warnings |= 0x04; fprintf(stderr, "Warning: Pattern %d uses special panning effects not available in XM. It will not play correctly.\n", i);}
                             }
                         }
                         if (effect == 0x08) {effectop <<= 1; memory[channel].pan = effectop;}
@@ -1001,6 +1058,262 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
     return 0;
 }
 
+// Writes a module from a file pointer to a new S3M file.
+// S3M file format from http://web.archive.org/web/20060831105434/http://pipin.tmd.ns.ac.yu/extra/fileformat/modules/s3m/s3m.txt
+int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL) {
+    // Die if there are too many instruments for S3M & we're not trimming instruments
+    if (sampleOffsets.size() > 255 && !trimInstruments) {
+        fprintf(stderr, "Error: This ROM cannot be ripped without trimming instruments.\n");
+        return 10;
+    }
+    // Open the S3M file
+    FILE* out = fopen(filename, "wb");
+    if (out == NULL) {
+        fprintf(stderr, "Could not open output file %s for writing.\n", filename);
+        return 2;
+    }
+    // Read the module from the ROM
+    Module * mod = readModuleFile(fp, moduleOffset);
+    // Count how many patterns there are
+    unsigned char patternCount = 0;
+    for (int i = 0; i < mod->numOrders; i++) patternCount = std::max(patternCount, mod->order[i]);
+    patternCount++;
+    // Check for some basic requirements before going further
+    if (mod->flagInstrumentBased || mod->patterns[0]->rows != 64) {
+        fprintf(stderr, "Error: This ROM does not support S3M output.\n");
+        for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
+        free(mod);
+        fclose(out);
+        return 3;
+    }
+    // If we're trimming instruments, go through all of the patterns and see which instruments we need
+    std::map<unsigned short, unsigned char> instrumentMap;
+    if (trimInstruments) {
+        unsigned char nextInstrument = 1;
+        for (int i = 0; i < patternCount; i++) {
+            const unsigned char * data = mod->patterns[i]->data;
+            for (int row = 0; row < 64 && data < mod->patterns[i]->data + mod->patterns[i]->length; row++) {
+                for (;;) {
+                    // Read the channel/next byte types
+                    unsigned char follow = *data++;
+                    if (!follow) break; // If it's 0, the row's done
+                    if (follow & 0x20) { // Note & instrument follows
+                        unsigned char note = *data++;
+                        unsigned short instrument = *data++;
+                        if (version < 0x20040707) { // For versions before 2004-07-07, note is high 7 bits & instrument is low 9 bits
+                            instrument |= (note & 1) << 8;
+                            note >>= 1;
+                        } else if (note & 0x80) { // For versions starting with 2004-07-07, if the note > 128, the instrument field is 2 bytes long
+                            instrument |= *data++ << 8;
+                            note &= 0x7f;
+                        }
+                        if (instrument != 0 && instrumentMap.find(instrument) == instrumentMap.end()) {
+                            if (nextInstrument == 255) {
+                                fprintf(stderr, "Error: Too many instruments in module, cannot continue.\n");
+                                for (int l = 0; l < patternCount; l++) free((void*)mod->patterns[l]);
+                                free(mod);
+                                fclose(out);
+                                return 3;
+                            }
+                            instrumentMap[instrument] = nextInstrument++;
+                        }
+                    }
+                    if (follow & 0x40) data++;
+                    if (follow & 0x80) data += 2;
+                }
+            }
+        }
+    }
+    // Write the S3M header info
+    if (name == NULL) fwrite("Krawall conversion\0\0\0\0\0\0\0\0\0\0", 28, 1, out);
+    else {
+        fwrite(name, 1, std::min(strlen(name), (size_t)28), out);
+        if (strlen(name) < 28) fputcn(0, 28 - strlen(name), out);
+    }
+    fputc(0x1A, out);
+    fputc(16, out); // Type (16=ST3 module)
+    fputcn(0, 2, out); // padding
+    fputc(mod->numOrders, out);
+    fputc(0, out);
+    fputc(trimInstruments ? instrumentMap.size() : sampleOffsets.size(), out);
+    fputc(0, out);
+    fputc(patternCount, out);
+    fputc(0, out);
+    fputc((mod->flagAmigaLimits ? 16 : 0) | (mod->flagVolOpt ? 8 : 0) | (mod->flagVolSlides ? 64 : 0), out);
+    fputc(0, out);
+    fputc(0x13, out); // Tracker version
+    fputc(0x20, out); // ^^
+    fputc(2, out); // Unsigned samples
+    fputc(0, out);
+    fwrite("SCRM", 4, 1, out);
+    fputc(mod->volGlobal, out);
+    fputc(mod->initSpeed, out);
+    fputc(mod->initBPM, out);
+    fputc(64, out); // Master volume (maximum)
+    fputc(0, out); // Ultra click removal
+    fputc(252, out); // Has channel pan positions
+    fputcn(0, 10, out); // padding
+    // Write the channel settings
+    for (int i = 0; i < mod->channels / 2; i++) fputc(i, out);
+    for (int i = 0; i < mod->channels / 2 + mod->channels % 2; i++) fputc(i | 8, out);
+    fputcn(0xFF, 32 - mod->channels, out);
+    // Write all of the orders
+    fwrite(mod->order, 1, mod->numOrders, out);
+    // Write parapointers
+    int paddingBytes = 0;
+    uint16_t tmp;
+    // Write the parapointers to each instrument
+    for (int i = 0; i < (trimInstruments ? instrumentMap.size() : sampleOffsets.size()); i++) {
+        tmp = (0x60 + mod->numOrders + (trimInstruments ? instrumentMap.size() : sampleOffsets.size()) * 2 + patternCount * 2 + 32 + i * 0x50) + paddingBytes; // Header + orders + instrument parapointers + pattern parapointers + pan positions + previous instruments
+        if (tmp & 0xF) {paddingBytes += 16 - (tmp & 0xF); tmp = (tmp & 0xFFF0) + 0x10;}
+        tmp >>= 4;
+        fwrite(&tmp, 2, 1, out);
+    }
+    int offset = 0;
+    // Write the parapointers to each pattern
+    for (int i = 0; i < patternCount; i++) {
+        // S3M requires all patterns to be exactly 64 rows, so die if any pattern has <> 64 rows
+        if (mod->patterns[i]->rows != 64) {
+            fprintf(stderr, "Error: This ROM does not support S3M output. (If S3M was auto-detected, try using the -x switch instead.)\n");
+            for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
+            free(mod);
+            fclose(out);
+            return 3;
+        }
+        tmp = 0x60 + mod->numOrders + (trimInstruments ? instrumentMap.size() : sampleOffsets.size()) * 0x52 + patternCount * 2 + 32 + offset + paddingBytes; // Header + orders + instrument parapointers + pattern parapointers + pan positions + instruments + previous patterns
+        if (tmp & 0xF) {paddingBytes += 16 - (tmp & 0xF); tmp = (tmp & 0xFFF0) + 0x10;}
+        tmp >>= 4;
+        fwrite(&tmp, 2, 1, out);
+        offset += mod->patterns[i]->s3mlength + 2;
+    }
+    // Write channel pan positions
+    for (int i = 0; i < mod->channels; i++) {
+        if (mod->channelPan[i] == 0) fputc(0x27, out);
+        else fputc((mod->channelPan[i] >> 4) | 0x20, out);
+    }
+    fputcn(0x08, 32 - mod->channels, out);
+    // Write each instrument header
+    std::vector<Sample*> samples;
+    for (int i = 0; i < (trimInstruments ? instrumentMap.size() : sampleOffsets.size()); i++) {
+        // Get instrument number to write
+        unsigned short inst = 0;
+        if (trimInstruments) {
+            for (auto p : instrumentMap) {
+                if (p.second == i + 1) {
+                    inst = p.first - 1;
+                    break;
+                }
+            }
+        } else inst = i;
+        // Pad to 16 bytes
+        while (ftell(out) & 0xF) fputc(0, out);
+        fputc(1, out); // Type (1=Sample)
+        fputcn(0, 12, out); // DOS filename
+        uint32_t memseg = 0x60 + mod->numOrders + (trimInstruments ? instrumentMap.size() : sampleOffsets.size()) * 0x52 + patternCount * 2 + 32 + offset + paddingBytes; // Header + orders + instrument parapointers + pattern parapointers + pan positions + instruments + patterns + previous samples
+        if (memseg & 0xF) {paddingBytes += 16 - (memseg & 0xF); memseg = (memseg & 0xFFFFF0) + 0x10;}
+        memseg >>= 4;
+        fputc((memseg >> 16) & 0xFF, out); // Sample parapointer high byte
+        fputc(memseg & 0xFF, out); // Sample parapointer low two bytes (LE)
+        fputc((memseg >> 8) & 0xFF, out);
+        Sample * s = readSampleFile(fp, sampleOffsets[inst]);
+        fwrite(&s->size, 4, 1, out);
+        memseg = s->size - s->loopLength;
+        fwrite(&memseg, 4, 1, out); // Loop beginning
+        memseg = s->size + 1;
+        fwrite(&memseg, 4, 1, out); // Loop end
+        fputc(s->volDefault, out);
+        fputcn(0, 2, out); // Padding, packing type (0)
+        fputc((s->loop ? 1 : 0), out); // Flags
+        fwrite(&s->c2Freq, 4, 1, out);
+        fputcn(0, 12, out); // Padding/unused
+        // Write sample name
+        char name[28];
+        memset(name, 0, 28);
+        snprintf(name, 28, "Sample%d", inst);
+        fwrite(name, 1, 28, out);
+        fwrite("SCRS", 4, 1, out);
+        offset += s->size;
+        samples.push_back(s);
+    }
+    // Write each pattern
+    // Krawall pattern data is nearly identical to S3M packed pattern data, so not much conversion is needed
+    // We only really need to fix the note/instrument packing, volume column format, and effects
+    for (int i = 0; i < patternCount; i++) {
+        // Pad to 16 bytes
+        while (ftell(out) & 0xF) fputc(0, out);
+        // Write the pattern length (it'll be the same length as the Krawall data)
+        fwrite(&mod->patterns[i]->s3mlength, 2, 1, out);
+        const unsigned char * data = mod->patterns[i]->data;
+        int warnings = 0;
+        // Loop through each row of the pattern
+        for (int row = 0; row < 64 && data < mod->patterns[i]->data + mod->patterns[i]->length; row++) {
+            for (;;) {
+                // Read the channel/next byte types
+                unsigned char follow = *data++;
+                fputc(follow, out);
+                if (!follow) break; // If it's 0, the row's done
+                if (follow & 0x20) { // Note & instrument follows
+                    unsigned char note = *data++;
+                    unsigned short instrument = *data++;
+                    if (version < 0x20040707) { // For versions before 2004-07-07, note is high 7 bits & instrument is low 9 bits
+                        instrument |= (note & 1) << 8;
+                        note >>= 1;
+                    } else if (note & 0x80) { // For versions starting with 2004-07-07, if the note > 128, the instrument field is 2 bytes long
+                        instrument |= *data++ << 8;
+                        note &= 0x7f;
+                    }
+                    if (note >= 97 || note == 0) fputc(254, out); // 254 = note off
+                    else fputc((((note - 1) / 12) << 4) | ((note - 1) % 12), out); // S3M wants hi=oct, lo=note
+                    fputc(trimInstruments ? (instrument == 0 ? 0 : instrumentMap[instrument]) : instrument, out); // Write instrument
+                }
+                if (follow & 0x40) { // Volume follows
+                    // XM/Krawall stores volume from 0x10-0x50, while S3M expects it at 0x00-0x40, so subtract to fix
+                    unsigned char volume = *data++;
+                    if (volume < 0x10) fputc(0xFF, out); // < 0x10 = nothing
+                    else if (volume <= 0x50) fputc(volume - 0x10, out); // 0x10 - 0x50 = volume
+                    else if (volume >= 0xC0 && volume < 0xD0) fputc((volume - 0x40) << 2, out); // 0xC0 - 0xCF = panning (MPT only)
+                    else {
+                        if (!(warnings & 0x01)) {warnings |= 0x01; fprintf(stderr, "Warning: Pattern %d uses special volume column effects not available in S3M. It will not play correctly.\n", i);}
+                        fputc(0xFF, out);
+                    }
+                }
+                if (follow & 0x80) { // Effect follows
+                    unsigned char effect = *data++;
+                    unsigned char effectop = *data++;
+                    if (effect == 3) { // Speed/BPM
+                        if (effectop >= 0x20) effect = 0x1D;
+                        else effect = 0x0A;
+                    } else { // Other effects
+                        // Convert the Krawall effect into an S3M effect
+                        unsigned short s3meffect = effectMap_s3m[effect].first;
+                        unsigned char effectmask = effectMap_s3m[effect].second;
+                        if (effect == 9) effectop <<= 4; // Volume slide up needs to shift the op up by 4 bits
+                        s3meffect = s3meffect | (effectop & effectmask);
+                        effect = s3meffect >> 8;
+                        effectop = s3meffect & 0xFF;
+                    }
+                    // Write the final effect
+                    fputc(effect, out);
+                    fputc(effectop, out);
+                }
+            }
+        }
+    }
+    // Write sample data
+    for (int i = 0; i < samples.size(); i++) {
+        while (ftell(out) & 0xF) fputc(0, out);
+        Sample * s = samples[i];
+        fwrite(s->data, 1, s->size, out);
+        free(s);
+    }
+    // Free & close the patterns, module, & file
+    for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
+    free(mod);
+    fclose(out);
+    printf("Successfully wrote module to %s.\n", filename);
+    return 0;
+}
+
 #ifndef AS_LIBRARY
 
 // Looks for a string in a file
@@ -1023,15 +1336,17 @@ int main(int argc, const char * argv[]) {
                         "  -i <address>      Override instrument list address\n"
                         "  -l <file.txt>     Read module names from a file (one name/line, same format as -n)\n"
                         "  -m <address>      Add an extra module address to the list\n"
-                        "  -n <addr>=<name>  Assign a name to a module address (max. 20 characters)\n"
+                        "  -n <addr>=<name>  Assign a name to a module address (max. 20 characters for XM, 28 for S3M)\n"
                         "  -o <directory>    Output directory\n"
                         "  -s <address>      Override sample list address\n"
                         "  -t <threshold>    Search threshold, lower = slower but finds smaller modules,\n"
                         "                      higher = faster but misses smaller modules (defaults to 4)\n"
+                        "  -3                Force extraction to output S3M modules (only supported with some modules)\n"
                         "  -a                Do not trim extra instruments; this will make modules much larger in size!\n"
+                        "  -c                Disable compatibility fixes, makes patterns more accurate but worsens playback\n"
                         "  -e                Export samples to WAV files\n"
                         "  -v                Enable verbose mode\n"
-                        "  -x                Disable compatibility fixes, makes patterns more accurate but worsens playback\n"
+                        "  -x                Force extraction to output XM modules\n"
                         "  -h                Show this help\n", argv[0]);
         return 1;
     }
@@ -1042,6 +1357,7 @@ int main(int argc, const char * argv[]) {
     bool trimInstruments = true;
     bool exportSamples = false;
     bool fixCompatibility = true;
+    int moduleType = -1;
     std::string romPath;
     uint32_t sampleAddr = 0, instrumentAddr = 0;
     std::vector<uint32_t> additionalModules;
@@ -1099,10 +1415,12 @@ int main(int argc, const char * argv[]) {
         } else if (argv[i][0] == '-') {
             for (int j = 1; j < strlen(argv[i]); j++) {
                 switch (argv[i][j]) {
+                    case '3': moduleType = 1; break;
                     case 'a': trimInstruments = false; break;
+                    case 'c': fixCompatibility = false; break;
                     case 'e': exportSamples = true; break;
                     case 'i': nextArg = 1; break;
-                    case 'k': version = 20030101; break;
+                    case 'k': version = 0x20030901; break;
                     case 'l': nextArg = 7; break;
                     case 'm': nextArg = 2; break;
                     case 'n': nextArg = 6; break;
@@ -1110,7 +1428,7 @@ int main(int argc, const char * argv[]) {
                     case 's': nextArg = 4; break;
                     case 't': nextArg = 5; break;
                     case 'v': verbose = true; break;
-                    case 'x': fixCompatibility = false; break;
+                    case 'x': moduleType = 0; break;
                 }
             }
         } else if (romPath.empty()) romPath = argv[i];
@@ -1127,7 +1445,7 @@ int main(int argc, const char * argv[]) {
         return 2;
     }
     // Look for a Krawall signature & version in the file and warn if one isn't found
-    if (!fstr(fp, "$Id: Krawall")) printf("Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
+    if (!fstr(fp, "$Id: Krawall")) fprintf(stderr, "Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
     else if (fstr(fp, "$Date: ")) {
         // $Date: 2000/01/01
         char tmp[11];
@@ -1199,8 +1517,24 @@ int main(int argc, const char * argv[]) {
     }
     // Write out all of the new modules
     for (int i = 0; i < offsets.modules.size(); i++) {
-        std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + ".xm";
-        int r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL), fixCompatibility);
+        // Detect whether to use S3M or XM module format
+        fseek(fp, offsets.modules[i] + 358, SEEK_SET);
+        bool useS3M = (!fgetc(fp) && moduleType != 0) || moduleType == 1; // Check the instrumentBased flag
+        if (useS3M && moduleType != 1) {
+            // Also check that the first module (at least) has exactly 64 rows
+            uint32_t tmp = 0;
+            uint16_t tmp16 = 0;
+            fseek(fp, 5, SEEK_CUR);
+            fread(&tmp, 4, 1, fp);
+            fseek(fp, (tmp & 0x1ffffff) + 32, SEEK_SET);
+            if (version < 0x20040707) tmp16 = fgetc(fp);
+            else fread(&tmp16, 2, 1, fp);
+            useS3M = tmp16 == 64;
+        }
+        std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + (useS3M ? ".s3m" : ".xm");
+        int r;
+        if (useS3M) r = unkrawerter_writeModuleToS3M(fp, offsets.modules[i], sampleOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL));
+        else r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL), fixCompatibility);
         if (r) {fclose(fp); return r;}
     }
     fclose(fp);
