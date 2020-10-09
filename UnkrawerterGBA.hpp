@@ -1,10 +1,10 @@
 /*
  * UnkrawerterGBA
- * Version 2.1
+ * Version 3.0
  * 
  * This program automatically extracts music files from Gameboy Advance games
- * that use the Krawall sound engine. Audio files are extracted in the XM module
- * format, which can be opened by programs such as OpenMPT.
+ * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
+ * module format, which can be opened by programs such as OpenMPT.
  * 
  * This file is intended for use as a library. Make sure to define AS_LIBRARY
  * when compiling UnkrawerterGBA to avoid defining main.
@@ -58,8 +58,30 @@ extern void unkrawerter_readSampleToWAV(FILE* fp, uint32_t offset, const char * 
 // Writes a single XM module at an offset from a ROM file, using the specified samples and instruments.
 // trimInstruments specifies whether to remove instruments that are not used by the module.
 // name specifies the name of the module; if unset then the module is named "Krawall conversion".
-// fixCompatibility specifies whether to make some changes to the pattern data in order to emulate some Krawall quirks. Set to true for accurate playback; set to false for accurate pattern data.
+// fixCompatibility specifies whether to make some changes to the pattern data in order to emulate some Krawall/S3M quirks. Set to true for accurate playback; set to false for accurate pattern data.
 // Returns 0 on success, non-zero on error.
-extern int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true);
+extern int unkrawerter_writeModuleToXM(
+    FILE* fp,
+    uint32_t moduleOffset,
+    const std::vector<uint32_t> &sampleOffsets,
+    const std::vector<uint32_t> &instrumentOffsets,
+    const char * filename,
+    bool trimInstruments = true,
+    const char * name = NULL,
+    bool fixCompatibility = true
+);
+
+// Writes a module from a file pointer to a new S3M file.
+// trimInstruments specifies whether to remove instruments that are not used by the module.
+// name specifies the name of the module; if unset then the module is named "Krawall conversion".
+// Returns 0 on success, non-zero on error.
+extern int unkrawerter_writeModuleToS3M(
+    FILE* fp,
+    uint32_t moduleOffset,
+    const std::vector<uint32_t> &sampleOffsets,
+    const char * filename,
+    bool trimInstruments = true,
+    const char * name = NULL
+);
 
 #endif
