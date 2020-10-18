@@ -23,6 +23,8 @@ In its most basic form, you can run UnkrawerterGBA with just the ROM path, and i
   -a                Do not trim extra instruments; this will make modules much larger in size!
   -c                Disable compatibility fixes, makes patterns more accurate but worsens playback
   -e                Export samples to WAV files
+  -k                Force Krawall version to 20030901 (disables auto-detection)
+  -K                Force Krawall version to 20050421 (disables auto-detection)
   -v                Enable verbose mode
   -x                Force extraction to output XM modules
   -h                Show this help
