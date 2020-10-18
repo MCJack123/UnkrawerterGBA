@@ -1,8 +1,8 @@
 /*
  * UnkrawerterGBA
- * Version 3.0
+ * Version 3.1
  * 
- * This program automatically extracts music files from Gameboy Advance games
+ * This program automatically extracts music files from Game Boy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
  * module format, which can be opened by programs such as OpenMPT.
  * 
