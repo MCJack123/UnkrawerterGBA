@@ -1,8 +1,8 @@
 /*
  * UnkrawerterGBA
- * Version 3.0
+ * Version 3.1
  * 
- * This program automatically extracts music files from Gameboy Advance games
+ * This program automatically extracts music files from Game Boy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
  * module format, which can be opened by programs such as OpenMPT.
  * 
@@ -120,7 +120,7 @@ OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, boo
             uint32_t tmp = fgetc(fp);
             if (tmp == 0 || tmp > 0x10) {possible_mask &= 0b110; break;}
             tmp = fgetc(fp);
-            if (tmp < 30 || tmp > 200) {possible_mask &= 0b110; break;} // tweak this?
+            if (tmp < 30) {possible_mask &= 0b110; break;} // tweak this?
             for (int i = 0; i < 5; i++) if (fgetc(fp) & 0xfe) {possible_mask &= 0b110; break;}
             if (!(possible_mask & 1)) break;
             if (fgetc(fp)) {possible_mask &= 0b110; break;}
@@ -391,6 +391,15 @@ static Instrument readInstrumentFile(FILE* fp, uint32_t offset) {
     fseek(fp, offset, SEEK_SET);
     Instrument retval;
     fread(&retval, sizeof(retval), 1, fp);
+    // There's a chance that one of the high bytes in the sample number list gets set to some random (?) value
+    // I've experienced this in Cocoto games, where one of the high notes' samples has the low byte the same as the others,
+    // but the high byte is set to some really high value (like 0x98).
+    // I'm not sure why this is, but we'll try to fix it anyway.
+    for (int i = 0; i < 96; i++) {
+        if ((retval.samples[i] & 0xff00) != 0 && (i > 0 ? (retval.samples[i] & 0xff) == (retval.samples[i-1] & 0xff) : true) && (i < 95 ? (retval.samples[i] & 0xff) == (retval.samples[i+1] & 0xff) : true)) {
+            retval.samples[i] &= 0xff;
+        }
+    }
     return retval;
 }
 
@@ -945,7 +954,16 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
             // Seems inefficient but it's impossible to avoid
             std::vector<Sample*> sarr;
             for (int j = 0; j < snum; j++) {
-                if (samples[j] > sampleOffsets.size()) continue; // If the sample isn't present then skip it
+                if (samples[j] > sampleOffsets.size()) {
+                    // If the sample isn't present then insert an empty sample
+                    fprintf(stderr, "Warning: Could not find sample %d in instrument %d; inserting an empty sample to avoid breaking things.\n", samples[j], i);
+                    fputcn(0, 40, out);
+                    // Add an empty sample structure to the sample list
+                    Sample * blank = (Sample*)malloc(sizeof(Sample));
+                    memset(blank, 0, sizeof(Sample));
+                    sarr.push_back(blank);
+                    continue;
+                }
                 // Read the sample from the file
                 Sample * s = readSampleFile(fp, sampleOffsets[samples[j]]);
                 // Write the sample header
@@ -1141,8 +1159,8 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     fputc(0, out);
     fputc((mod->flagAmigaLimits ? 16 : 0) | (mod->flagVolOpt ? 8 : 0) | (mod->flagVolSlides ? 64 : 0), out);
     fputc(0, out);
-    fputc(0x13, out); // Tracker version
-    fputc(0x20, out); // ^^
+    fputc(0x20, out); // Tracker version
+    fputc(0x13, out); // ^^
     fputc(2, out); // Unsigned samples
     fputc(0, out);
     fwrite("SCRM", 4, 1, out);
@@ -1174,7 +1192,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     for (int i = 0; i < patternCount; i++) {
         // S3M requires all patterns to be exactly 64 rows, so die if any pattern has <> 64 rows
         if (mod->patterns[i]->rows != 64) {
-            fprintf(stderr, "Error: This ROM does not support S3M output. (If S3M was auto-detected, try using the -x switch instead.)\n");
+            fprintf(stderr, "Error: This ROM does not support S3M output. (If S3M was auto-detected, try using the -x switch.)\n");
             for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
             free(mod);
             fclose(out);
@@ -1189,7 +1207,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     // Write channel pan positions
     for (int i = 0; i < mod->channels; i++) {
         if (mod->channelPan[i] == 0) fputc(0x27, out);
-        else fputc((mod->channelPan[i] >> 4) | 0x20, out);
+        else fputc((((int)mod->channelPan[i] + 128) >> 4) | 0x20, out);
     }
     fputcn(0x08, 32 - mod->channels, out);
     // Write each instrument header
@@ -1345,6 +1363,8 @@ int main(int argc, const char * argv[]) {
                         "  -a                Do not trim extra instruments; this will make modules much larger in size!\n"
                         "  -c                Disable compatibility fixes, makes patterns more accurate but worsens playback\n"
                         "  -e                Export samples to WAV files\n"
+                        "  -k                Force Krawall version to 20030901 (disables auto-detection)\n"
+                        "  -K                Force Krawall version to 20050421 (disables auto-detection)\n"
                         "  -v                Enable verbose mode\n"
                         "  -x                Force extraction to output XM modules\n"
                         "  -h                Show this help\n", argv[0]);
@@ -1357,6 +1377,7 @@ int main(int argc, const char * argv[]) {
     bool trimInstruments = true;
     bool exportSamples = false;
     bool fixCompatibility = true;
+    bool detectVersion = true;
     int moduleType = -1;
     std::string romPath;
     uint32_t sampleAddr = 0, instrumentAddr = 0;
@@ -1420,7 +1441,8 @@ int main(int argc, const char * argv[]) {
                     case 'c': fixCompatibility = false; break;
                     case 'e': exportSamples = true; break;
                     case 'i': nextArg = 1; break;
-                    case 'k': version = 0x20030901; break;
+                    case 'k': version = 0x20030901; detectVersion = false; break;
+                    case 'K': version = 0x20050421; detectVersion = false; break;
                     case 'l': nextArg = 7; break;
                     case 'm': nextArg = 2; break;
                     case 'n': nextArg = 6; break;
@@ -1446,21 +1468,23 @@ int main(int argc, const char * argv[]) {
     }
     // Look for a Krawall signature & version in the file and warn if one isn't found
     if (!fstr(fp, "$Id: Krawall")) fprintf(stderr, "Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
-    else if (fstr(fp, "$Date: ")) {
+    else if (detectVersion && fstr(fp, "$Date: ")) {
         // $Date: 2000/01/01
         char tmp[11];
         fread(tmp, 10, 1, fp);
         tmp[10] = 0;
         version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+        detectVersion = false;
         printf("Krawall version: %08x\n", version);
-    } else {
+    } else if (detectVersion) {
         rewind(fp);
         if (fstr(fp, "$Id: version.h 8 ")) {
-            // $Id: version.h 8 2001-01-01
+            // $Id: version.h 8 2000-01-01
             char tmp[11];
             fread(tmp, 10, 1, fp);
             tmp[10] = 0;
             version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+            detectVersion = false;
             printf("Krawall version: %08x\n", version);
         }
     }
@@ -1468,6 +1492,15 @@ int main(int argc, const char * argv[]) {
     // Search for the offsets
     OffsetSearchResult offsets;
     offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
+    // If we didn't find any modules and the version is unknown, try again with the older version
+    if (detectVersion && offsets.modules.empty()) {
+        version = 0x20030901;
+        offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
+        if (!offsets.modules.empty()) {
+            printf("Auto-detected old pattern version\n");
+            detectVersion = false;
+        }
+    }
     // Add in overrides if provided
     if (sampleAddr) {
         offsets.sampleAddr = sampleAddr & 0x1ffffff;
@@ -1520,7 +1553,7 @@ int main(int argc, const char * argv[]) {
         // Detect whether to use S3M or XM module format
         fseek(fp, offsets.modules[i] + 358, SEEK_SET);
         bool useS3M = (!fgetc(fp) && moduleType != 0) || moduleType == 1; // Check the instrumentBased flag
-        if (useS3M && moduleType != 1) {
+        if (useS3M && moduleType != 1 && !detectVersion) {
             // Also check that the first module (at least) has exactly 64 rows
             uint32_t tmp = 0;
             uint16_t tmp16 = 0;
@@ -1530,6 +1563,54 @@ int main(int argc, const char * argv[]) {
             if (version < 0x20040707) tmp16 = fgetc(fp);
             else fread(&tmp16, 2, 1, fp);
             useS3M = tmp16 == 64;
+        }
+        // Detect version if no signature version is available
+        else if (detectVersion) {
+            // Also check that the first module (at least) has exactly 64 rows
+            uint32_t addr[4] = {0, 0, 0, 0};
+            char tmprows[2];
+            fseek(fp, 5, SEEK_CUR);
+            fread(addr, 4, 4, fp);
+            for (int i = 0; detectVersion && i < searchThreshold && (addr[i] & 0xfe000000) == 0x8000000; i++) {
+                fseek(fp, (addr[i] & 0x1ffffff) + 32, SEEK_SET);
+                fread(tmprows, 1, 2, fp);
+                // Scenarios:
+                // - Byte 2 is 0:
+                //   > Using new version, less than 256 rows
+                //   > Using old version, first row is empty
+                //     - We can check the next pattern in the module to see if this pattern repeats
+                //     - It's highly unlikely that four consecutive patterns have the first row empty
+                //       - If this assumption is false, just manually override the version
+                // - Byte 2 is not 0:
+                //   > Using old version, this is the first row's follow
+                //     - For this to be true, byte & 0xE0 must be non-zero
+                //   > Using new version, more than 256 rows (unlikely; impossible when using S3M)
+                if (tmprows[1] == 0) {
+                    if (tmprows[0] == 64 && useS3M) {
+                        printf("Auto-detected new pattern version\n");
+                        version = 0x20050421;
+                        detectVersion = false;
+                    }
+                } else {
+                    if (tmprows[1] & 0xE0 == 0) {
+                        printf("Auto-detected new pattern version\n");
+                        version = 0x20050421;
+                        detectVersion = false;
+                    } else {
+                        printf("Auto-detected old pattern version\n");
+                        version = 0x20030901;
+                        detectVersion = false;
+                    }
+                }
+            }
+            // If all of the second bytes are 0, the version is more likely than not to be new
+            if (detectVersion) {
+                printf("Auto-detected new pattern version\n");
+                version = 0x20050421;
+                detectVersion = false;
+            }
+            if (useS3M && moduleType != 1 && !detectVersion)
+                useS3M = tmprows[0] == 64 && (version < 0x20040707 ? true : tmprows[1] == 0);
         }
         std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + (useS3M ? ".s3m" : ".xm");
         int r;
