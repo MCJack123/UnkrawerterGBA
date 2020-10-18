@@ -1592,7 +1592,7 @@ int main(int argc, const char * argv[]) {
                         detectVersion = false;
                     }
                 } else {
-                    if (tmprows[1] & 0xE0 == 0) {
+                    if ((tmprows[1] & 0xE0) == 0) {
                         printf("Auto-detected new pattern version\n");
                         version = 0x20050421;
                         detectVersion = false;
