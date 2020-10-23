@@ -1289,8 +1289,10 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
                     unsigned char volume = *data++;
                     if (volume < 0x10) fputc(0xFF, out); // < 0x10 = nothing
                     else if (volume <= 0x50) fputc(volume - 0x10, out); // 0x10 - 0x50 = volume
-                    else if (volume >= 0xC0 && volume < 0xD0) fputc((volume - 0x40) << 2, out); // 0xC0 - 0xCF = panning (MPT only)
-                    else {
+                    else if (volume >= 0xC0 && volume < 0xD0) {
+                        if (!(warnings & 0x02)) {warnings |= 0x02; fprintf(stderr, "Warning: Pattern %d uses special volume column effects only available in OpenMPT. It may not play correctly in other trackers.\n", i);}
+                        fputc(((volume - 0xC0) << 2) | 0x80, out); // 0xC0 - 0xCF = panning (MPT only)
+                    } else {
                         if (!(warnings & 0x01)) {warnings |= 0x01; fprintf(stderr, "Warning: Pattern %d uses special volume column effects not available in S3M. It will not play correctly.\n", i);}
                         fputc(0xFF, out);
                     }
