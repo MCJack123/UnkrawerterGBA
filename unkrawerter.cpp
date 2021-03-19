@@ -1,12 +1,12 @@
 /*
  * UnkrawerterGBA
- * Version 3.1
+ * Version 4.0
  * 
  * This program automatically extracts music files from Game Boy Advance games
  * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
  * module format, which can be opened by programs such as OpenMPT.
  * 
- * Copyright (c) 2020 JackMacWindows.
+ * Copyright (c) 2020-2021 JackMacWindows.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -136,6 +136,8 @@ OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, boo
             if (tmp2 > 256 || (tmp2 & 7)) {possible_mask &= 0b110; break;}
         } while (0);
 
+        if (std::get<1>(p) < 4) possible_mask &= 0b001;
+        else {
         for (int i = 0; i < std::min(std::get<1>(p), 4u); i++) { // Check for sample
             fseek(fp, std::get<0>(p) + i*4, SEEK_SET);
             uint32_t addr = 0;
@@ -173,6 +175,7 @@ OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, boo
             if (fgetc(fp) > 12) {possible_mask &= 0b011; break;}
             if (fgetc(fp) > 12) {possible_mask &= 0b011; break;}
             fgetc(fp); //if (fgetc(fp) > 0x10) {possible_mask &= 0b011; break;}
+        }
         }
         std::get<2>(p) = possible_mask;
     });
@@ -316,12 +319,12 @@ extern "C" {
 }
 
 // Read a pattern from a file pointer to a Pattern structure pointer
-static Pattern * readPatternFile(FILE* fp, uint32_t offset, bool use2003format) {
+static Pattern * readPatternFile(FILE* fp, uint32_t offset, bool use2003format, bool isRipped) {
     fseek(fp, offset + 32, SEEK_SET);
     std::vector<uint8_t> fileContents;
     unsigned short rows = 0;
     unsigned short s3mlength = 0;
-    if (use2003format) rows = fgetc(fp);
+    if (use2003format && !isRipped) rows = fgetc(fp);
     else fread(&rows, 2, 1, fp);
     // We don't need to do full decoding; decode just enough to understand the size of the pattern
     for (int row = 0; row < rows; row++) {
@@ -380,8 +383,8 @@ static Module * readModuleFile(FILE* fp, uint32_t offset) {
     for (int i = 0; i <= maxPattern; i++) {
         fseek(fp, offset + 364 + i*4, SEEK_SET);
         fread(&addr, 4, 1, fp);
-        if (!(addr & 0x08000000) || (addr & 0xf6000000)) break;
-        retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff, version < 0x20040707);
+        if (offset != 4 && !(addr & 0x08000000) || (addr & 0xf6000000)) break;
+        retval2->patterns[i] = readPatternFile(fp, addr & 0x1ffffff, version < 0x20040707, offset == 4);
     }
     return retval2;
 }
@@ -553,16 +556,17 @@ struct channel_memory {
 
 // Writes a module from a file pointer to a new XM file.
 // XM file format from http://web.archive.org/web/20060809013752/http://pipin.tmd.ns.ac.yu/extra/fileformat/modules/xm/xm.txt
-int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true) {
+int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true, FILE* instfp = NULL) {
+    if (instfp == NULL) instfp = fp;
     // Die if there are too many instruments for XM & we're not trimming instruments
     if (instrumentOffsets.size() > 255 && !trimInstruments) {
-        fprintf(stderr, "Error: This ROM cannot be ripped without trimming instruments.\n");
+        fprintf(stderr, "Error: This module cannot be ripped without trimming instruments.\n");
         return 10;
     }
     // Open the XM file
     FILE* out = fopen(filename, "wb");
     if (out == NULL) {
-        fprintf(stderr, "Could not open output file %s for writing.\n", filename);
+        fprintf(stderr, "Error: Could not open output file %s for writing.\n", filename);
         return 2;
     }
     // Read the module from the file
@@ -571,7 +575,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
     for (int i = 0; i < mod->numOrders; i++) patternCount = std::max(patternCount, mod->order[i]);
     patternCount++;
     if (mod->flagInstrumentBased && instrumentOffsets.empty()) {
-        fprintf(stderr, "Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
+        fprintf(stderr, "Error: Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
         for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
         free(mod);
         fclose(out);
@@ -890,7 +894,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
         // Write all of the instruments used by the module
         for (unsigned short i : instrumentList) {
             // Read the instrument info
-            Instrument instr = readInstrumentFile(fp, instrumentOffsets[i]);
+            Instrument instr = readInstrumentFile(instfp, instrumentOffsets[i]);
             // Find all of the unique samples
             std::vector<unsigned short> samples;
             samples.resize(96);
@@ -965,7 +969,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
                     continue;
                 }
                 // Read the sample from the file
-                Sample * s = readSampleFile(fp, sampleOffsets[samples[j]]);
+                Sample * s = readSampleFile(instfp, sampleOffsets[samples[j]]);
                 // Write the sample header
                 fwrite(&s->size, 4, 1, out);
                 // Loop start has to be computed from the end & length
@@ -1027,7 +1031,7 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
             fputc(40, out);
             fputcn(0, 3 + 96 + 96 + 16, out); // 4-byte padding + rest of instrument data (all 0)
             fputcn(0, 11, out); // Padding as required by XM
-            Sample * s = readSampleFile(fp, sampleOffsets[i]);
+            Sample * s = readSampleFile(instfp, sampleOffsets[i]);
             // Write the sample header
             fwrite(&s->size, 4, 1, out);
             // Loop start has to be computed from the end & length
@@ -1078,16 +1082,17 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
 
 // Writes a module from a file pointer to a new S3M file.
 // S3M file format from http://web.archive.org/web/20060831105434/http://pipin.tmd.ns.ac.yu/extra/fileformat/modules/s3m/s3m.txt
-int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL) {
+int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, FILE* instfp = NULL) {
+    if (instfp == NULL) instfp = fp;
     // Die if there are too many instruments for S3M & we're not trimming instruments
     if (sampleOffsets.size() > 255 && !trimInstruments) {
-        fprintf(stderr, "Error: This ROM cannot be ripped without trimming instruments.\n");
+        fprintf(stderr, "Error: This module cannot be ripped without trimming instruments.\n");
         return 10;
     }
     // Open the S3M file
     FILE* out = fopen(filename, "wb");
     if (out == NULL) {
-        fprintf(stderr, "Could not open output file %s for writing.\n", filename);
+        fprintf(stderr, "Error: Could not open output file %s for writing.\n", filename);
         return 2;
     }
     // Read the module from the ROM
@@ -1098,7 +1103,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     patternCount++;
     // Check for some basic requirements before going further
     if (mod->flagInstrumentBased || mod->patterns[0]->rows != 64) {
-        fprintf(stderr, "Error: This ROM does not support S3M output.\n");
+        fprintf(stderr, "Error: This module does not support S3M output.\n");
         for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
         free(mod);
         fclose(out);
@@ -1192,7 +1197,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     for (int i = 0; i < patternCount; i++) {
         // S3M requires all patterns to be exactly 64 rows, so die if any pattern has <> 64 rows
         if (mod->patterns[i]->rows != 64) {
-            fprintf(stderr, "Error: This ROM does not support S3M output. (If S3M was auto-detected, try using the -x switch.)\n");
+            fprintf(stderr, "Error: This module does not support S3M output. (If S3M was auto-detected, try using the -x switch.)\n");
             for (int i = 0; i < patternCount; i++) free((void*)mod->patterns[i]);
             free(mod);
             fclose(out);
@@ -1233,7 +1238,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
         fputc((memseg >> 16) & 0xFF, out); // Sample parapointer high byte
         fputc(memseg & 0xFF, out); // Sample parapointer low two bytes (LE)
         fputc((memseg >> 8) & 0xFF, out);
-        Sample * s = readSampleFile(fp, sampleOffsets[inst]);
+        Sample * s = readSampleFile(instfp, sampleOffsets[inst]);
         fwrite(&s->size, 4, 1, out);
         memseg = s->size - s->loopLength;
         fwrite(&memseg, 4, 1, out); // Loop beginning
@@ -1263,6 +1268,10 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
         fwrite(&mod->patterns[i]->s3mlength, 2, 1, out);
         const unsigned char * data = mod->patterns[i]->data;
         int warnings = 0;
+        unsigned char globalFix[32];
+        unsigned char globalMemory[32][15]; // Some effects use global memory that Krawall doesn't emulate, so we fix that
+        memset(globalFix, 0, 32);
+        for (int j = 0; j < mod->channels; j++) memset(globalMemory[j], 0, 15);
         // Loop through each row of the pattern
         for (int row = 0; row < 64 && data < mod->patterns[i]->data + mod->patterns[i]->length; row++) {
             for (;;) {
@@ -1311,6 +1320,12 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
                         s3meffect = s3meffect | (effectop & effectmask);
                         effect = s3meffect >> 8;
                         effectop = s3meffect & 0xFF;
+                        // Fix effects that use global memory, as Krawall uses local memory instead
+                        if (effect == 4 || effect == 5 || effect == 6 || effect == 9 || effect == 10 || effect == 11 || effect == 12 || effect == 17 || effect == 18) {
+                            if (effectop == 0 && globalFix[follow & 31] != effect) effectop = globalMemory[follow & 31][effect-4];
+                            else if (effectop != 0) globalMemory[follow & 31][effect-4] = effectop;
+                        }
+                        globalFix[follow & 31] = effect;
                     }
                     // Write the final effect
                     fputc(effect, out);
@@ -1334,6 +1349,84 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     return 0;
 }
 
+bool unkrawerter_writeBankFile(FILE* fp, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename) {
+    FILE* out = fopen(filename, "wb");
+    if (out == NULL) {
+        fprintf(stderr, "Error: Could not open output file %s for writing.\n", filename);
+        return false;
+    }
+    fwrite(version < 0x20040707 ? "KRWC" : "KRWB", 4, 1, out);
+    uint16_t tmp = instrumentOffsets.size();
+    fwrite(&tmp, 2, 1, out);
+    tmp = sampleOffsets.size();
+    fwrite(&tmp, 2, 1, out);
+    for (int i = 0; i < instrumentOffsets.size(); i++) {
+        uint32_t tmp2 = i * sizeof(Instrument) + 8;
+        fwrite(&tmp2, 4, 1, out);
+    }
+    fputcn(0, sampleOffsets.size() * 4, out);
+    for (int i = 0; i < instrumentOffsets.size(); i++) {
+        uint8_t data[sizeof(Instrument)];
+        fseek(fp, instrumentOffsets[i], SEEK_SET);
+        fread(data, sizeof(Instrument), 1, fp);
+        fwrite(data, sizeof(Instrument), 1, out);
+    }
+    for (int i = 0; i < sampleOffsets.size(); i++) {
+        Sample data;
+        uint32_t off = ftell(out);
+        fseek(out, (instrumentOffsets.size() + i) * 4 + 8, SEEK_SET);
+        fwrite(&off, 4, 1, out);
+        fseek(out, off, SEEK_SET);
+        fseek(fp, sampleOffsets[i], SEEK_SET);
+        fread(&data, sizeof(Sample) - 1, 1, fp);
+        data.size = (data.size & 0x1ffffff) - sampleOffsets[i] + off;
+        fwrite(&data, sizeof(Sample) - 1, 1, out);
+        void * samples = malloc(data.size - off);
+        fread(samples, 1, data.size - off, fp);
+        fwrite(samples, 1, data.size - off, out);
+        free(samples);
+    }
+    printf("Successfully wrote instrument bank to %s.\n", filename);
+    fclose(out);
+    return true;
+}
+
+bool unkrawerter_writeModuleFile(FILE* fp, uint32_t moduleOffset, const char * filename) {
+    FILE* out = fopen(filename, "wb");
+    if (out == NULL) {
+        fprintf(stderr, "Error: Could not open output file %s for writing.\n", filename);
+        return false;
+    }
+    fwrite("KRWM", 4, 1, out);
+    Module mod;
+    fseek(fp, moduleOffset, SEEK_SET);
+    fread(&mod, sizeof(Module)-sizeof(Pattern*), 1, fp);
+    fwrite(&mod, sizeof(Module)-sizeof(Pattern*), 1, out);
+    unsigned char patternCount = 0;
+    for (int i = 0; i < mod.numOrders; i++) if (mod.order[i] < 254) patternCount = std::max(patternCount, mod.order[i]);
+    patternCount++;
+    fputcn(0, patternCount * 4, out);
+    std::vector<uint32_t> patternOffsets;
+    for (int i = 0; i < patternCount; i++) {
+        uint32_t off = ftell(out);
+        fseek(out, sizeof(Module)-sizeof(Pattern*) + i*4 + 4, SEEK_SET);
+        fwrite(&off, 4, 1, out);
+        fseek(out, off, SEEK_SET);
+        uint32_t addr = 0;
+        fread(&addr, 4, 1, fp);
+        off = ftell(fp);
+        Pattern * pat = readPatternFile(fp, addr & 0x1ffffff, version < 0x20040707, false);
+        fseek(fp, off, SEEK_SET);
+        fwrite(pat->index, 2, 16, out);
+        fwrite(&pat->rows, 2, 1, out);
+        fwrite(pat->data, 1, pat->length, out);
+        free(pat);
+    }
+    printf("Successfully wrote ripped module to %s.\n", filename);
+    fclose(out);
+    return true;
+}
+
 #ifndef AS_LIBRARY
 
 // Looks for a string in a file
@@ -1353,6 +1446,8 @@ int main(int argc, const char * argv[]) {
         // Help
         fprintf(stderr, "Usage: %s [options...] <rom.gba>\n"
                         "Options:\n"
+                        "  -f <file.krm>     Ripped module to convert; may be used multiple times\n"
+                        "                      If this option is specified, the <rom.gba> argument must point to the bank instead\n"
                         "  -i <address>      Override instrument list address\n"
                         "  -l <file.txt>     Read module names from a file (one name/line, same format as -n)\n"
                         "  -m <address>      Add an extra module address to the list\n"
@@ -1367,6 +1462,7 @@ int main(int argc, const char * argv[]) {
                         "  -e                Export samples to WAV files\n"
                         "  -k                Force Krawall version to 20030901 (disables auto-detection)\n"
                         "  -K                Force Krawall version to 20050421 (disables auto-detection)\n"
+                        "  -r                Rip data into Krawall bank/modules without conversion\n"
                         "  -v                Enable verbose mode\n"
                         "  -x                Force extraction to output XM modules\n"
                         "  -h                Show this help\n", argv[0]);
@@ -1380,10 +1476,13 @@ int main(int argc, const char * argv[]) {
     bool exportSamples = false;
     bool fixCompatibility = true;
     bool detectVersion = true;
+    bool ripModules = false;
+    bool useBank = false;
     int moduleType = -1;
     std::string romPath;
     uint32_t sampleAddr = 0, instrumentAddr = 0;
     std::vector<uint32_t> additionalModules;
+    std::vector<std::string> rippedModulePaths;
     std::map<uint32_t, std::string> nameMap;
     int nextArg = 0;
     // Loop through all arguments
@@ -1433,6 +1532,7 @@ int main(int argc, const char * argv[]) {
                     fclose(fp);
                     break;
                 }
+                case 8: useBank = true; rippedModulePaths.push_back(argv[i]); break;
             }
             nextArg = 0;
         } else if (argv[i][0] == '-') {
@@ -1442,6 +1542,7 @@ int main(int argc, const char * argv[]) {
                     case 'a': trimInstruments = false; break;
                     case 'c': fixCompatibility = false; break;
                     case 'e': exportSamples = true; break;
+                    case 'f': nextArg = 8; break;
                     case 'i': nextArg = 1; break;
                     case 'k': version = 0x20030901; detectVersion = false; break;
                     case 'K': version = 0x20050421; detectVersion = false; break;
@@ -1449,6 +1550,7 @@ int main(int argc, const char * argv[]) {
                     case 'm': nextArg = 2; break;
                     case 'n': nextArg = 6; break;
                     case 'o': nextArg = 3; break;
+                    case 'r': ripModules = true; break;
                     case 's': nextArg = 4; break;
                     case 't': nextArg = 5; break;
                     case 'v': verbose = true; break;
@@ -1459,88 +1561,126 @@ int main(int argc, const char * argv[]) {
     }
     // Die if no ROM file was specified
     if (romPath.empty()) {
-        fprintf(stderr, "Error: No ROM file specified.\n");
+        fprintf(stderr, "Error: No %s file specified.\n", useBank ? "bank" : "ROM");
         return 4;
     }
+    std::vector<uint32_t> sampleOffsets, instrumentOffsets, moduleOffsets;
+    int moduleOffsetsSize;
     // Open the ROM file
     FILE* fp = fopen(romPath.c_str(), "rb");
     if (fp == NULL) {
-        fprintf(stderr, "Could not open file %s for reading.", romPath.c_str());
+        fprintf(stderr, "Error: Could not open file %s for reading.\n", romPath.c_str());
         return 2;
     }
-    // Look for a Krawall signature & version in the file and warn if one isn't found
-    if (!fstr(fp, "$Id: Krawall")) fprintf(stderr, "Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
-    else if (detectVersion && fstr(fp, "$Date: ")) {
-        // $Date: 2000/01/01
-        char tmp[11];
-        fread(tmp, 10, 1, fp);
-        tmp[10] = 0;
-        version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+    if (useBank) {
+        if (ripModules) {
+            fprintf(stderr, "Error: The -f option cannot be combined with -r.\n");
+            return 4;
+        }
+        // Read the version info
+        char ver[4];
+        fread(ver, 4, 1, fp);
+        if (ver[0] != 'K' || ver[1] != 'R' || ver[2] != 'W' || (ver[3] != 'B' && ver[3] != 'C')) {
+            fprintf(stderr, "Error: The selected file is not a Krawall bank file.\n");
+            return 9;
+        }
+        version = ver[3] & 1 ? 0x20030901 : 0x20050421;
         detectVersion = false;
-        printf("Krawall version: %08x\n", version);
-    } else if (detectVersion) {
-        rewind(fp);
-        if (fstr(fp, "$Id: version.h 8 ")) {
-            // $Id: version.h 8 2000-01-01
+        // Read in instrument and sample info
+        uint16_t instsize = 0, samplesize = 0;
+        fread(&instsize, 2, 1, fp);
+        fread(&samplesize, 2, 1, fp);
+        uint32_t tmp = 0;
+        for (int i = 0; i < instsize; i++) {
+            fread(&tmp, 4, 1, fp);
+            instrumentOffsets.push_back(tmp);
+        }
+        for (int i = 0; i < samplesize; i++) {
+            fread(&tmp, 4, 1, fp);
+            sampleOffsets.push_back(tmp);
+        }
+        moduleOffsetsSize = rippedModulePaths.size();
+    } else {
+        // Die if the threshold < 1
+        if (searchThreshold < 1) {
+            fprintf(stderr, "Error: Threshold must be at least 1.\n");
+            return 13;
+        }
+        // Look for a Krawall signature & version in the file and warn if one isn't found
+        if (!fstr(fp, "$Id: Krawall")) fprintf(stderr, "Warning: Could not find Krawall signature. Are you sure this game uses the Krawall engine?\n");
+        else if (detectVersion && fstr(fp, "$Date: ")) {
+            // $Date: 2000/01/01
             char tmp[11];
             fread(tmp, 10, 1, fp);
             tmp[10] = 0;
             version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
             detectVersion = false;
             printf("Krawall version: %08x\n", version);
+        } else if (detectVersion) {
+            rewind(fp);
+            if (fstr(fp, "$Id: version.h 8 ")) {
+                // $Id: version.h 8 2000-01-01
+                char tmp[11];
+                fread(tmp, 10, 1, fp);
+                tmp[10] = 0;
+                version = ((tmp[0] - '0') << 28) | ((tmp[1] - '0') << 24) | ((tmp[2] - '0') << 20) | ((tmp[3] - '0') << 16) | ((tmp[5] - '0') << 12) | ((tmp[6] - '0') << 8) | ((tmp[8] - '0') << 4) | (tmp[9] - '0');
+                detectVersion = false;
+                printf("Krawall version: %08x\n", version);
+            }
         }
-    }
-    rewind(fp);
-    // Search for the offsets
-    OffsetSearchResult offsets;
-    offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
-    // If we didn't find any modules and the version is unknown, try again with the older version
-    if (detectVersion && offsets.modules.empty()) {
-        version = 0x20030901;
+        rewind(fp);
+        // Search for the offsets
+        OffsetSearchResult offsets;
         offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
-        if (!offsets.modules.empty()) {
-            printf("Auto-detected old pattern version\n");
-            detectVersion = false;
+        // If we didn't find any modules and the version is unknown, try again with the older version
+        if (detectVersion && offsets.modules.empty()) {
+            version = 0x20030901;
+            offsets = unkrawerter_searchForOffsets(fp, searchThreshold, verbose);
+            if (!offsets.modules.empty()) {
+                printf("Auto-detected old pattern version\n");
+                detectVersion = false;
+            }
         }
-    }
-    // Add in overrides if provided
-    if (sampleAddr) {
-        offsets.sampleAddr = sampleAddr & 0x1ffffff;
+        // Add in overrides if provided
+        if (sampleAddr) {
+            offsets.sampleAddr = sampleAddr & 0x1ffffff;
+            uint32_t tmp = 0;
+            fseek(fp, offsets.sampleAddr, SEEK_SET);
+            fread(&tmp, 4, 1, fp);
+            for (offsets.sampleCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.sampleCount++) fread(&tmp, 4, 1, fp);
+            rewind(fp);
+        }
+        if (instrumentAddr) {
+            offsets.instrumentAddr = instrumentAddr & 0x1ffffff;
+            uint32_t tmp = 0;
+            fseek(fp, offsets.instrumentAddr, SEEK_SET);
+            fread(&tmp, 4, 1, fp);
+            for (offsets.instrumentCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.instrumentCount++) fread(&tmp, 4, 1, fp);
+            rewind(fp);
+        }
+        for (uint32_t a : additionalModules) offsets.modules.push_back(a);
+        offsets.success = offsets.sampleAddr && !offsets.modules.empty();
+        // If we don't have all of the required offsets, we can't continue
+        if (!offsets.success) {
+            fprintf(stderr, "Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
+            return 3;
+        }
+        // Read each of the offsets from the lists in the file into vectors
         uint32_t tmp = 0;
         fseek(fp, offsets.sampleAddr, SEEK_SET);
-        fread(&tmp, 4, 1, fp);
-        for (offsets.sampleCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.sampleCount++) fread(&tmp, 4, 1, fp);
-        rewind(fp);
-    }
-    if (instrumentAddr) {
-        offsets.instrumentAddr = instrumentAddr & 0x1ffffff;
-        uint32_t tmp = 0;
-        fseek(fp, offsets.instrumentAddr, SEEK_SET);
-        fread(&tmp, 4, 1, fp);
-        for (offsets.instrumentCount = 0; (tmp & 0xf6000000) == 0 && (tmp & 0x8000000) == 0x8000000; offsets.instrumentCount++) fread(&tmp, 4, 1, fp);
-        rewind(fp);
-    }
-    for (uint32_t a : additionalModules) offsets.modules.push_back(a);
-    offsets.success = offsets.sampleAddr && !offsets.modules.empty();
-    // If we don't have all of the required offsets, we can't continue
-    if (!offsets.success) {
-        fprintf(stderr, "Could not find all of the offsets required.\n * Does the ROM use the Krawall engine?\n * Try adjusting the search threshold.\n * You may need to find offsets yourself.\n");
-        return 3;
-    }
-    // Read each of the offsets from the lists in the file into vectors
-    std::vector<uint32_t> sampleOffsets, instrumentOffsets;
-    uint32_t tmp = 0;
-    fseek(fp, offsets.sampleAddr, SEEK_SET);
-    for (int i = 0; i < offsets.sampleCount; i++) {
-        fread(&tmp, 4, 1, fp);
-        sampleOffsets.push_back(tmp & 0x1ffffff);
-    }
-    if (offsets.instrumentAddr) {
-        fseek(fp, offsets.instrumentAddr, SEEK_SET);
-        for (int i = 0; i < offsets.instrumentCount; i++) {
+        for (int i = 0; i < offsets.sampleCount; i++) {
             fread(&tmp, 4, 1, fp);
-            instrumentOffsets.push_back(tmp & 0x1ffffff);
+            sampleOffsets.push_back(tmp & 0x1ffffff);
         }
+        if (offsets.instrumentAddr) {
+            fseek(fp, offsets.instrumentAddr, SEEK_SET);
+            for (int i = 0; i < offsets.instrumentCount; i++) {
+                fread(&tmp, 4, 1, fp);
+                instrumentOffsets.push_back(tmp & 0x1ffffff);
+            }
+        }
+        moduleOffsets = offsets.modules;
+        moduleOffsetsSize = moduleOffsets.size();
     }
     // Export all WAV samples (if desired)
     if (exportSamples) {
@@ -1550,75 +1690,95 @@ int main(int argc, const char * argv[]) {
             printf("Wrote sample %d to %s\n", i, name.c_str());
         }
     }
-    // Write out all of the new modules
-    for (int i = 0; i < offsets.modules.size(); i++) {
-        // Detect whether to use S3M or XM module format
-        fseek(fp, offsets.modules[i] + 358, SEEK_SET);
-        bool useS3M = (!fgetc(fp) && moduleType != 0) || moduleType == 1; // Check the instrumentBased flag
-        if (useS3M && moduleType != 1 && !detectVersion) {
-            // Also check that the first module (at least) has exactly 64 rows
-            uint32_t tmp = 0;
-            uint16_t tmp16 = 0;
-            fseek(fp, 5, SEEK_CUR);
-            fread(&tmp, 4, 1, fp);
-            fseek(fp, (tmp & 0x1ffffff) + 32, SEEK_SET);
-            if (version < 0x20040707) tmp16 = fgetc(fp);
-            else fread(&tmp16, 2, 1, fp);
-            useS3M = tmp16 == 64;
+    // Write the instrument/sample bank (if desired)
+    if (ripModules) {
+        bool ok = unkrawerter_writeBankFile(fp, sampleOffsets, instrumentOffsets, (outputDir + romPath.substr(romPath.find_last_of("/\\") + 1) + ".krb").c_str());
+        if (!ok) {
+            fclose(fp);
+            return 2;
         }
-        // Detect version if no signature version is available
-        else if (detectVersion) {
-            // Also check that the first module (at least) has exactly 64 rows
-            uint32_t addr[4] = {0, 0, 0, 0};
-            char tmprows[2];
-            fseek(fp, 5, SEEK_CUR);
-            fread(addr, 4, 4, fp);
-            for (int i = 0; detectVersion && i < searchThreshold && (addr[i] & 0xfe000000) == 0x8000000; i++) {
-                fseek(fp, (addr[i] & 0x1ffffff) + 32, SEEK_SET);
-                fread(tmprows, 1, 2, fp);
-                // Scenarios:
-                // - Byte 2 is 0:
-                //   > Using new version, less than 256 rows
-                //   > Using old version, first row is empty
-                //     - We can check the next pattern in the module to see if this pattern repeats
-                //     - It's highly unlikely that four consecutive patterns have the first row empty
-                //       - If this assumption is false, just manually override the version
-                // - Byte 2 is not 0:
-                //   > Using old version, this is the first row's follow
-                //     - For this to be true, byte & 0xE0 must be non-zero
-                //   > Using new version, more than 256 rows (unlikely; impossible when using S3M)
-                if (tmprows[1] == 0) {
-                    if (tmprows[0] == 64 && useS3M) {
-                        printf("Auto-detected new pattern version\n");
-                        version = 0x20050421;
-                        detectVersion = false;
-                    }
-                } else {
-                    if ((tmprows[1] & 0xE0) == 0) {
-                        printf("Auto-detected new pattern version\n");
-                        version = 0x20050421;
-                        detectVersion = false;
+    }
+    // Write out all of the new modules
+    for (int i = 0; i < moduleOffsetsSize; i++) {
+        if (ripModules) {
+            std::string name = outputDir + (nameMap.find(moduleOffsets[i]) != nameMap.end() ? nameMap[moduleOffsets[i]] : "Module" + std::to_string(i)) + ".krw";
+            bool ok = unkrawerter_writeModuleFile(fp, moduleOffsets[i], name.c_str());
+            if (!ok) {
+                fclose(fp);
+                return 2;
+            }
+        } else {
+            FILE* modfp = fp;
+            if (useBank) modfp = fopen(rippedModulePaths[i].c_str(), "rb");
+            // Detect whether to use S3M or XM module format
+            fseek(modfp, (useBank ? 4 : moduleOffsets[i]) + 358, SEEK_SET);
+            bool useS3M = (!fgetc(modfp) && moduleType != 0) || moduleType == 1; // Check the instrumentBased flag
+            if (useS3M && moduleType != 1 && !detectVersion) {
+                // Also check that the first module (at least) has exactly 64 rows
+                uint32_t tmp = 0;
+                uint16_t tmp16 = 0;
+                fseek(modfp, 5, SEEK_CUR);
+                fread(&tmp, 4, 1, modfp);
+                fseek(modfp, (tmp & 0x1ffffff) + 32, SEEK_SET);
+                if (version < 0x20040707) tmp16 = fgetc(modfp);
+                else fread(&tmp16, 2, 1, modfp);
+                useS3M = tmp16 == 64;
+            }
+            // Detect version if no signature version is available
+            else if (detectVersion) {
+                // Also check that the first module (at least) has exactly 64 rows
+                uint32_t addr[4] = {0, 0, 0, 0};
+                char tmprows[2];
+                fseek(modfp, 5, SEEK_CUR);
+                fread(addr, 4, 4, modfp);
+                for (int i = 0; detectVersion && i < searchThreshold && (addr[i] & 0xfe000000) == 0x8000000; i++) {
+                    fseek(modfp, (addr[i] & 0x1ffffff) + 32, SEEK_SET);
+                    fread(tmprows, 1, 2, modfp);
+                    // Scenarios:
+                    // - Byte 2 is 0:
+                    //   > Using new version, less than 256 rows
+                    //   > Using old version, first row is empty
+                    //     - We can check the next pattern in the module to see if this pattern repeats
+                    //     - It's highly unlikely that four consecutive patterns have the first row empty
+                    //       - If this assumption is false, just manually override the version
+                    // - Byte 2 is not 0:
+                    //   > Using old version, this is the first row's follow
+                    //     - For this to be true, byte & 0xE0 must be non-zero
+                    //   > Using new version, more than 256 rows (unlikely; impossible when using S3M)
+                    if (tmprows[1] == 0) {
+                        if (tmprows[0] == 64 && useS3M) {
+                            printf("Auto-detected new pattern version\n");
+                            version = 0x20050421;
+                            detectVersion = false;
+                        }
                     } else {
-                        printf("Auto-detected old pattern version\n");
-                        version = 0x20030901;
-                        detectVersion = false;
+                        if ((tmprows[1] & 0xE0) == 0) {
+                            printf("Auto-detected new pattern version\n");
+                            version = 0x20050421;
+                            detectVersion = false;
+                        } else {
+                            printf("Auto-detected old pattern version\n");
+                            version = 0x20030901;
+                            detectVersion = false;
+                        }
                     }
                 }
+                // If all of the second bytes are 0, the version is more likely than not to be new
+                if (detectVersion) {
+                    printf("Auto-detected new pattern version\n");
+                    version = 0x20050421;
+                    detectVersion = false;
+                }
+                if (useS3M && moduleType != 1 && !detectVersion)
+                    useS3M = tmprows[0] == 64 && (version < 0x20040707 ? true : tmprows[1] == 0);
             }
-            // If all of the second bytes are 0, the version is more likely than not to be new
-            if (detectVersion) {
-                printf("Auto-detected new pattern version\n");
-                version = 0x20050421;
-                detectVersion = false;
-            }
-            if (useS3M && moduleType != 1 && !detectVersion)
-                useS3M = tmprows[0] == 64 && (version < 0x20040707 ? true : tmprows[1] == 0);
+            std::string title = (useBank ? rippedModulePaths[i].substr(rippedModulePaths[i].find_last_of("/\\") + 1, rippedModulePaths[i].find(".krw") - (rippedModulePaths[i].find_last_of("/\\") + 1)) : (nameMap.find(moduleOffsets[i]) != nameMap.end() ? nameMap[moduleOffsets[i]] : ""));
+            std::string name = outputDir + (title.empty() ? "Module" + std::to_string(i) : title) + (useS3M ? ".s3m" : ".xm");
+            int r;
+            if (useS3M) r = unkrawerter_writeModuleToS3M(modfp, useBank ? 4 : moduleOffsets[i], sampleOffsets, name.c_str(), trimInstruments, title.empty() ? NULL : title.c_str(), fp);
+            else r = unkrawerter_writeModuleToXM(modfp, useBank ? 4 : moduleOffsets[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments, title.empty() ? NULL : title.c_str(), fixCompatibility, fp);
+            if (r) {fclose(fp); return r;}
         }
-        std::string name = outputDir + (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]] : "Module" + std::to_string(i)) + (useS3M ? ".s3m" : ".xm");
-        int r;
-        if (useS3M) r = unkrawerter_writeModuleToS3M(fp, offsets.modules[i], sampleOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL));
-        else r = unkrawerter_writeModuleToXM(fp, offsets.modules[i], sampleOffsets, instrumentOffsets, name.c_str(), trimInstruments, (nameMap.find(offsets.modules[i]) != nameMap.end() ? nameMap[offsets.modules[i]].c_str() : NULL), fixCompatibility);
-        if (r) {fclose(fp); return r;}
     }
     fclose(fp);
     return 0;
