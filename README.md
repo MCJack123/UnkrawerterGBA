@@ -11,6 +11,8 @@ To use UnkrawerterGBA as a library, make sure to add a macro named `AS_LIBRARY` 
 ## Usage
 In its most basic form, you can run UnkrawerterGBA with just the ROM path, and it will output the module files in the current directory. You can also add the following options to the command line:
 ```
+  -f <file.krm>     Ripped module to convert; may be used multiple times\n"
+                      If this option is specified, the <rom.gba> argument must point to the bank instead
   -i <address>      Override instrument list address
   -l <file.txt>     Read module names from a file (one name/line, same format as -n)
   -m <address>      Add an extra module address to the list
@@ -25,6 +27,7 @@ In its most basic form, you can run UnkrawerterGBA with just the ROM path, and i
   -e                Export samples to WAV files
   -k                Force Krawall version to 20030901 (disables auto-detection)
   -K                Force Krawall version to 20050421 (disables auto-detection)
+  -r                Rip data into Krawall bank/modules without conversion
   -v                Enable verbose mode
   -x                Force extraction to output XM modules
   -h                Show this help
@@ -40,6 +43,11 @@ Enable verbose mode (`-v`) to show all of the detected addresses and their types
 UnkrawerterGBA 3.0 supports ripping music to either the XM module format or the S3M module format. Krawall natively supports both of these formats, but UnkrawerterGBA has to pick which format it needs to use. XM supports instruments and more than 64 rows per pattern, but S3M has a different effect syntax that is mostly incompatible with XM. Some compatibility fixes are available when exporting to XM, but it is better to export modules originally created as S3Ms to S3M files.
 
 UnkrawerterGBA makes a good guess at whether a module is best converted to XM or S3M. However, if it gets this wrong, or you want to force a different format, you can use the `-3` or `-x` arguments
+
+### Direct rip
+UnkrawerterGBA 4.0 adds a way to rip the modules and instruments directly without any conversion. This is useful for getting the highest quality rip without losing any information during conversion, or to keep file sizes low. To create a direct rip, use the `-r` flag. This will create a `.krb` file with the instruments, and one `.krw` file for each module in the ROM.
+
+To convert a direct-rip module into an XM or S3M file, use the `-f` flag for each `.krw` module to rip. Then specify the `.krb` bank file without any flags before it. Finally, run the program, and it will output the new XM or S3M files to the output directory.
 
 ## Library API
 UnkrawerterGBA also supports usage as a library for embedding in another program. These functions can be used to rip Krawall music from ROMs in another program.
@@ -70,7 +78,7 @@ Reads a sample at an offset from a ROM file to a WAV file.
 * `offset`: The offset of the sample to read.
 * `filename`: The path to the WAV file to write to.
 
-### `int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true)`
+### `int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, bool fixCompatibility = true, FILE* instfp = NULL)`
 Writes a single XM module at an offset from a ROM file, using the specified samples and instruments.
 * `fp`: The file to read from.
 * `moduleOffset`: The address of the module to read.
@@ -80,9 +88,10 @@ Writes a single XM module at an offset from a ROM file, using the specified samp
 * `trimInstruments`: Whether to remove instruments that are not used by the module. Defaults to true.
 * `name`: The name of the module; if unset then the module is named "Krawall conversion". Defaults to `NULL`. (The name must be <= 20 characters long.)
 * `fixCompatibility`: Whether to attempt to fix some effects that behave differently in Krawall/S3M. This will modify the extracted patterns and reduces extraction accuracy, but improves playback accuracy. Defaults to true.
+* `instfp`: A file handle to read instruments from. Defaults to `NULL` (use the ROM).
 * Returns: 0 on success, non-zero on error.
 
-### `int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL)`
+### `int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vector<uint32_t> &sampleOffsets, const char * filename, bool trimInstruments = true, const char * name = NULL, FILE* instfp = NULL)`
 Writes a single S3M module at an offset from a ROM file, using the specified samples. This will not work for instrument-based modules, or for patterns that have <> 64 rows.
 * `fp`: The file to read from.
 * `moduleOffset`: The address of the module to read.
@@ -90,7 +99,23 @@ Writes a single S3M module at an offset from a ROM file, using the specified sam
 * `filename`: The path to the S3M file to write to.
 * `trimInstruments`: Whether to remove instruments that are not used by the module. Defaults to true.
 * `name`: The name of the module; if unset then the module is named "Krawall conversion". Defaults to `NULL`. (The name must be <= 28 characters long.)
+* `instfp`: A file handle to read instruments from. Defaults to `NULL` (use the ROM).
 * Returns: 0 on success, non-zero on error.
+
+### `bool unkrawerter_writeBankFile(FILE* fp, const std::vector<uint32_t> &sampleOffsets, const std::vector<uint32_t> &instrumentOffsets, const char * filename)`
+Writes a Krawall Bank file to a path using the specified instrument and sample offsets.
+* `fp`: The ROM to read from.
+* `sampleOffsets`: The sample offsets in the ROM to use.
+* `instrumentOffsets`: The instrument offsets in the ROM to use. Pass an empty list to ignore.
+* `filename`: The name of the file to write.
+* Returns: `true` on success, `false` on error.
+
+### `bool unkrawerter_writeModuleFile(FILE* fp, uint32_t moduleOffset, const char * filename)`
+Writes a Krawall Module file to a path using the specified module offset.
+* `fp`: The ROM to read from.
+* `sampleOffsets`: The module offset in the ROM to use.
+* `filename`: The name of the file to write.
+* Returns: `true` on success, `false` on error.
 
 ### Finding Krawall data structures in ROMs manually
 If you desire to find the offsets on your own (such as if the automatic finder isn't working properly), you can search through the ROM for the offsets manually. This process will require the use of a hex editor, as well as some basic knowledge on reading hexadecimal from files. In most cases this is unnecessary, since the automatic detector is pretty good at finding the offsets itself.
