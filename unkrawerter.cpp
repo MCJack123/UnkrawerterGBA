@@ -6,7 +6,7 @@
  * that use the Krawall sound engine. Audio files are extracted in the XM or S3M
  * module format, which can be opened by programs such as OpenMPT.
  * 
- * Copyright (c) 2020-2021 JackMacWindows.
+ * Copyright (c) 2020-2022 JackMacWindows.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -148,7 +148,7 @@ OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, boo
             fread(&end, 4, 1, fp);
             if (!(end & 0x08000000) || (end & 0xf6000000) || end <= addr + 18 || tmp > end - addr - 18) {possible_mask &= 0b101; break;}
             fread(&tmp, 4, 1, fp);
-            if (tmp > 0xFFFFF) {possible_mask &= 0b101; break;}
+            if (tmp > 0xFFFF) {possible_mask &= 0b101; break;}
             fseek(fp, 4, SEEK_CUR);
             if ((fgetc(fp) & 0xfe) || (fgetc(fp) & 0xfe)) {possible_mask &= 0b101; break;}
         }
@@ -369,12 +369,6 @@ static Module * readModuleFile(FILE* fp, uint32_t offset) {
     memset(retval, 0, sizeof(Module));
     fseek(fp, offset, SEEK_SET);
     fread(retval, 364, 1, fp);
-    int markerAdd = 0;
-    for (int i = 0; i < retval->numOrders; i++) {
-        retval->order[i] = retval->order[i+markerAdd];
-        while (retval->order[i] == 254) {markerAdd++; retval->order[i] = retval->order[i+markerAdd];}
-    }
-    retval->numOrders -= markerAdd;
     unsigned char maxPattern = 0;
     for (int i = 0; i < retval->numOrders; i++) if (retval->order[i] != 254) maxPattern = std::max(maxPattern, retval->order[i]);
     Module * retval2 = (Module*)malloc(sizeof(Module) + sizeof(Pattern*) * (maxPattern + 1));
@@ -571,6 +565,12 @@ int unkrawerter_writeModuleToXM(FILE* fp, uint32_t moduleOffset, const std::vect
     }
     // Read the module from the file
     Module * mod = readModuleFile(fp, moduleOffset);
+    int markerAdd = 0;
+    for (int i = 0; i < mod->numOrders; i++) {
+        mod->order[i] = mod->order[i+markerAdd];
+        while (mod->order[i] == 254) {markerAdd++; mod->order[i] = mod->order[i+markerAdd];}
+    }
+    mod->numOrders -= markerAdd;
     unsigned char patternCount = 0;
     for (int i = 0; i < mod->numOrders; i++) patternCount = std::max(patternCount, mod->order[i]);
     patternCount++;
@@ -1099,7 +1099,7 @@ int unkrawerter_writeModuleToS3M(FILE* fp, uint32_t moduleOffset, const std::vec
     Module * mod = readModuleFile(fp, moduleOffset);
     // Count how many patterns there are
     unsigned char patternCount = 0;
-    for (int i = 0; i < mod->numOrders; i++) patternCount = std::max(patternCount, mod->order[i]);
+    for (int i = 0; i < mod->numOrders; i++) if (mod->order[i] != 254) patternCount = std::max(patternCount, mod->order[i]);
     patternCount++;
     // Check for some basic requirements before going further
     if (mod->flagInstrumentBased || mod->patterns[0]->rows != 64) {
@@ -1361,7 +1361,7 @@ bool unkrawerter_writeBankFile(FILE* fp, const std::vector<uint32_t> &sampleOffs
     tmp = sampleOffsets.size();
     fwrite(&tmp, 2, 1, out);
     for (int i = 0; i < instrumentOffsets.size(); i++) {
-        uint32_t tmp2 = i * sizeof(Instrument) + 8;
+        uint32_t tmp2 = i * sizeof(Instrument) + (instrumentOffsets.size() + sampleOffsets.size()) * 4 + 8;
         fwrite(&tmp2, 4, 1, out);
     }
     fputcn(0, sampleOffsets.size() * 4, out);
@@ -1379,11 +1379,11 @@ bool unkrawerter_writeBankFile(FILE* fp, const std::vector<uint32_t> &sampleOffs
         fseek(out, off, SEEK_SET);
         fseek(fp, sampleOffsets[i], SEEK_SET);
         fread(&data, sizeof(Sample) - 1, 1, fp);
-        data.size = (data.size & 0x1ffffff) - sampleOffsets[i] + off;
+        data.size = (data.size & 0x1ffffff) - sampleOffsets[i] + off + 18;
         fwrite(&data, sizeof(Sample) - 1, 1, out);
-        void * samples = malloc(data.size - off);
-        fread(samples, 1, data.size - off, fp);
-        fwrite(samples, 1, data.size - off, out);
+        void * samples = malloc(data.size - off - 18);
+        fread(samples, 1, data.size - off - 18, fp);
+        fwrite(samples, 1, data.size - off - 18, out);
         free(samples);
     }
     printf("Successfully wrote instrument bank to %s.\n", filename);
