@@ -148,7 +148,7 @@ OffsetSearchResult unkrawerter_searchForOffsets(FILE* fp, int threshold = 4, boo
             fread(&end, 4, 1, fp);
             if (!(end & 0x08000000) || (end & 0xf6000000) || end <= addr + 18 || tmp > end - addr - 18) {possible_mask &= 0b101; break;}
             fread(&tmp, 4, 1, fp);
-            if (tmp > 0xFFFF) {possible_mask &= 0b101; break;}
+            if (tmp > 0xFFFFF) {possible_mask &= 0b101; break;}
             fseek(fp, 4, SEEK_CUR);
             if ((fgetc(fp) & 0xfe) || (fgetc(fp) & 0xfe)) {possible_mask &= 0b101; break;}
         }
